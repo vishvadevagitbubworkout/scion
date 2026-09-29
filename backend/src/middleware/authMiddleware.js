@@ -76,3 +76,53 @@ export async function authenticate(req, res, next) {
     });
   }
 }
+
+/**
+ * Optional authentication middleware.
+ * Attempts to identify the user from a cookie or Bearer token.
+ * If a valid token is found, sets req.user. If no token or an invalid token is
+ * present, silently continues without setting req.user (anonymous access).
+ * Used for mixed-access endpoints (e.g. GET /api/journals/:id).
+ */
+export async function optionalAuthenticate(req, res, next) {
+  try {
+    let token = null;
+
+    if (req.cookies && req.cookies[ACCESS_TOKEN_COOKIE_NAME]) {
+      token = req.cookies[ACCESS_TOKEN_COOKIE_NAME];
+    } else if (
+      req.headers.authorization &&
+      req.headers.authorization.startsWith("Bearer ")
+    ) {
+      token = req.headers.authorization.split(" ")[1];
+    }
+
+    if (!token) return next();
+
+    let decoded;
+    try {
+      decoded = verifyAccessToken(token);
+    } catch {
+      // Invalid or expired token — treat as anonymous
+      return next();
+    }
+
+    if (!decoded || !decoded.sub) return next();
+
+    const user = await User.findById(decoded.sub);
+    if (user && user.isActive) {
+      req.user = {
+        id: user._id.toString(),
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        isActive: user.isActive,
+      };
+    }
+
+    next();
+  } catch (error) {
+    console.error("Optional auth middleware error:", error.message);
+    next(); // Always continue — never block on optional auth
+  }
+}

@@ -3,6 +3,7 @@ import cors from "cors";
 import cookieParser from "cookie-parser";
 import authRoutes from "./routes/authRoutes.js";
 import testRoutes from "./routes/testRoutes.js";
+import journalRoutes from "./routes/journalRoutes.js";
 
 const app = express();
 
@@ -30,8 +31,9 @@ app.get("/health", (req, res) => {
   });
 });
 
-// Authentication and test routes
+// Authentication, journal, and test routes
 app.use("/api/auth", authRoutes);
+app.use("/api/journals", journalRoutes);
 app.use("/api/test", testRoutes);
 
 export default app;
