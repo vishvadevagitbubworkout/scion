@@ -1,0 +1,195 @@
+/* ============================================================
+   CreateJournal.css — Phase 2 journal creation form styles
+   ============================================================ */
+
+.cj-wrapper {
+  min-height: calc(100vh - 64px);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 3rem 1rem 4rem;
+  background: var(--bg-page, #0f1117);
+}
+
+.cj-card {
+  width: 100%;
+  max-width: 760px;
+  background: var(--bg-card, #1a1d27);
+  border: 1px solid var(--border, rgba(255,255,255,0.08));
+  border-radius: 16px;
+  padding: 2.5rem 2.5rem 2rem;
+  box-shadow: 0 24px 64px rgba(0,0,0,0.45);
+}
+
+/* Header */
+.cj-header {
+  margin-bottom: 2rem;
+}
+
+.cj-badge {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #818cf8;
+  background: rgba(129,140,248,0.12);
+  border: 1px solid rgba(129,140,248,0.25);
+  padding: 0.25rem 0.7rem;
+  border-radius: 20px;
+  margin-bottom: 0.85rem;
+}
+
+.cj-title {
+  font-size: 1.75rem;
+  font-weight: 800;
+  color: #f1f5f9;
+  margin: 0 0 0.5rem;
+  line-height: 1.25;
+}
+
+.cj-subtitle {
+  font-size: 0.92rem;
+  color: #94a3b8;
+  margin: 0;
+}
+
+/* Error */
+.cj-error {
+  background: rgba(239,68,68,0.1);
+  border: 1px solid rgba(239,68,68,0.3);
+  color: #fca5a5;
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  margin-bottom: 1.5rem;
+}
+
+/* Form */
+.cj-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1.4rem;
+}
+
+.cj-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.cj-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #cbd5e1;
+  letter-spacing: 0.01em;
+}
+
+.cj-required {
+  color: #f87171;
+  margin-left: 2px;
+}
+
+.cj-input,
+.cj-select,
+.cj-textarea {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 8px;
+  padding: 0.7rem 0.9rem;
+  color: #f1f5f9;
+  font-size: 0.95rem;
+  font-family: inherit;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  outline: none;
+}
+
+.cj-input:focus,
+.cj-select:focus,
+.cj-textarea:focus {
+  border-color: #818cf8;
+  box-shadow: 0 0 0 3px rgba(129,140,248,0.18);
+}
+
+.cj-select {
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%2394a3b8' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.9rem center;
+  padding-right: 2.5rem;
+  cursor: pointer;
+}
+
+.cj-select option {
+  background: #1a1d27;
+}
+
+.cj-textarea {
+  resize: vertical;
+  line-height: 1.6;
+}
+
+.cj-textarea--short { min-height: 100px; }
+.cj-textarea--tall  { min-height: 300px; }
+
+.cj-hint {
+  font-size: 0.75rem;
+  color: #64748b;
+  text-align: right;
+}
+
+/* Actions */
+.cj-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  padding-top: 0.5rem;
+}
+
+.cj-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 0.65rem 1.5rem;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.2s, transform 0.15s;
+  border: none;
+}
+
+.cj-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none !important;
+}
+
+.cj-btn--primary {
+  background: linear-gradient(135deg, #818cf8, #6366f1);
+  color: #fff;
+  box-shadow: 0 4px 14px rgba(99,102,241,0.4);
+}
+
+.cj-btn--primary:hover:not(:disabled) {
+  opacity: 0.92;
+  transform: translateY(-1px);
+}
+
+.cj-btn--ghost {
+  background: transparent;
+  border: 1px solid rgba(255,255,255,0.12);
+  color: #94a3b8;
+}
+
+.cj-btn--ghost:hover:not(:disabled) {
+  border-color: rgba(255,255,255,0.25);
+  color: #f1f5f9;
+}
+
+@media (max-width: 540px) {
+  .cj-card { padding: 1.5rem 1.25rem 1.25rem; }
+  .cj-actions { flex-direction: column-reverse; }
+  .cj-btn { width: 100%; }
+}

@@ -9,6 +9,9 @@ import Register from "../pages/Register";
 import Journal from "../pages/Journal";
 import AuthorDashboard from "../pages/AuthorDashboard";
 import RootDashboard from "../pages/RootDashboard";
+import MyJournals from "../pages/MyJournals";
+import CreateJournal from "../pages/CreateJournal";
+import EditJournal from "../pages/EditJournal";
 
 function AppRoutes() {
   return (
@@ -30,6 +33,30 @@ function AppRoutes() {
                 element={
                   <ProtectedRoute allowedRoles={["AUTHOR", "ROOT"]}>
                     <AuthorDashboard />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/my-journals"
+                element={
+                  <ProtectedRoute allowedRoles={["AUTHOR", "ROOT"]}>
+                    <MyJournals />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/journals/create"
+                element={
+                  <ProtectedRoute allowedRoles={["AUTHOR", "ROOT"]}>
+                    <CreateJournal />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/journals/edit/:id"
+                element={
+                  <ProtectedRoute allowedRoles={["AUTHOR", "ROOT"]}>
+                    <EditJournal />
                   </ProtectedRoute>
                 }
               />
