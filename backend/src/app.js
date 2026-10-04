@@ -4,6 +4,7 @@ import cookieParser from "cookie-parser";
 import authRoutes from "./routes/authRoutes.js";
 import testRoutes from "./routes/testRoutes.js";
 import journalRoutes from "./routes/journalRoutes.js";
+import invitationRoutes from "./routes/invitationRoutes.js";
 
 const app = express();
 
@@ -31,9 +32,10 @@ app.get("/health", (req, res) => {
   });
 });
 
-// Authentication, journal, and test routes
+// Authentication, journal, invitation, and test routes
 app.use("/api/auth", authRoutes);
 app.use("/api/journals", journalRoutes);
+app.use("/api/invitations", invitationRoutes);
 app.use("/api/test", testRoutes);
 
 export default app;

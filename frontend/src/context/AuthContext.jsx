@@ -67,6 +67,11 @@ export function AuthProvider({ children }) {
     }
   };
 
+  const setAuthenticatedUser = (user) => {
+    setCurrentUser(user);
+    setAuthError(null);
+  };
+
   const value = {
     currentUser,
     loading,
@@ -75,6 +80,7 @@ export function AuthProvider({ children }) {
     login,
     register,
     logout,
+    setAuthenticatedUser,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
