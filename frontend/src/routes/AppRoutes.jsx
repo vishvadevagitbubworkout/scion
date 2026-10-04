@@ -7,6 +7,7 @@ import Home from "../pages/Home";
 import Login from "../pages/Login";
 import Register from "../pages/Register";
 import Journal from "../pages/Journal";
+import AcceptInvitation from "../pages/AcceptInvitation";
 import AuthorDashboard from "../pages/AuthorDashboard";
 import RootDashboard from "../pages/RootDashboard";
 import MyJournals from "../pages/MyJournals";
@@ -26,6 +27,7 @@ function AppRoutes() {
               <Route path="/login" element={<Login />} />
               <Route path="/register" element={<Register />} />
               <Route path="/journal/:id" element={<Journal />} />
+              <Route path="/accept-invitation" element={<AcceptInvitation />} />
 
               {/* Author Protected Routes (AUTHOR and ROOT) */}
               <Route
