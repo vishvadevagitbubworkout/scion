@@ -30,7 +30,7 @@ const invitationSchema = new mongoose.Schema(
     },
     otpHash: {
       type: String,
-      required: [true, "OTP hash is required"],
+      default: null,
       select: false,
     },
     otpAttempts: {

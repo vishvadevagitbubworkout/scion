@@ -32,18 +32,40 @@ async function request(path, options = {}) {
 
 export const invitationService = {
   /**
-   * ROOT creates a new author invitation.
+   * ROOT or AUTHOR sends OTP to invitee email.
    * @param {{ email: string }} payload
    */
-  async createInvitation({ email }) {
-    return await request("/invitations", {
+  async sendOtp({ email }) {
+    return await request("/invitations/send-otp", {
       method: "POST",
       body: JSON.stringify({ email }),
     });
   },
 
   /**
-   * ROOT retrieves all author invitations.
+   * ROOT or AUTHOR verifies OTP received from invitee.
+   * @param {{ email: string, otp: string }} payload
+   */
+  async verifyOtp({ email, otp }) {
+    return await request("/invitations/verify-otp", {
+      method: "POST",
+      body: JSON.stringify({ email, otp }),
+    });
+  },
+
+  /**
+   * ROOT or AUTHOR creates a secure invitation after email is verified.
+   * @param {{ email: string, verificationToken: string }} payload
+   */
+  async createInvitation({ email, verificationToken }) {
+    return await request("/invitations", {
+      method: "POST",
+      body: JSON.stringify({ email, verificationToken }),
+    });
+  },
+
+  /**
+   * Retrieves author invitations (ROOT: all; AUTHOR: own).
    */
   async getInvitations() {
     return await request("/invitations", {
@@ -52,7 +74,7 @@ export const invitationService = {
   },
 
   /**
-   * ROOT revokes a pending invitation.
+   * Revokes a pending invitation.
    * @param {string} id
    */
   async revokeInvitation(id) {
@@ -75,24 +97,13 @@ export const invitationService = {
   },
 
   /**
-   * Public verification of 6-digit OTP for an invitation.
-   * @param {{ token: string, otp: string }} payload
+   * Public completion of author account setup with setupToken, username, and password.
+   * @param {{ setupToken: string, username: string, password: string, confirmPassword?: string }} payload
    */
-  async verifyOtp({ token, otp }) {
-    return await request("/invitations/verify-otp", {
-      method: "POST",
-      body: JSON.stringify({ token, otp }),
-    });
-  },
-
-  /**
-   * Public completion of author account setup with setupToken.
-   * @param {{ setupToken: string, name: string, password: string }} payload
-   */
-  async completeSetup({ setupToken, name, password }) {
+  async completeSetup({ setupToken, username, password, confirmPassword }) {
     return await request("/invitations/complete", {
       method: "POST",
-      body: JSON.stringify({ setupToken, name, password }),
+      body: JSON.stringify({ setupToken, username, password, confirmPassword }),
     });
   },
 };

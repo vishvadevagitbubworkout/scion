@@ -1,5 +1,6 @@
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth";
+import InviteAuthorCard from "../components/InviteAuthorCard";
 
 export default function AuthorDashboard() {
   const { currentUser } = useAuth();
@@ -7,17 +8,36 @@ export default function AuthorDashboard() {
 
   return (
     <div style={{ maxWidth: "800px", margin: "2rem auto", padding: "1.5rem" }}>
-      <h1>Author Dashboard</h1>
-      <p>
-        Welcome, <strong>{currentUser?.name}</strong> ({currentUser?.role})
-      </p>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1.5rem" }}>
+        <div>
+          <h1 style={{ margin: 0, fontSize: "1.75rem", color: "#0f172a" }}>Author Dashboard</h1>
+          <p style={{ margin: "0.25rem 0 0", color: "#64748b", fontSize: "0.9rem" }}>
+            Welcome, <strong>{currentUser?.name}</strong> ({currentUser?.role})
+          </p>
+        </div>
+        <Link
+          to="/"
+          style={{
+            padding: "0.45rem 0.9rem",
+            backgroundColor: "#f1f5f9",
+            color: "#334155",
+            borderRadius: "6px",
+            textDecoration: "none",
+            fontSize: "0.85rem",
+            fontWeight: "600",
+          }}
+        >
+          ← Home
+        </Link>
+      </div>
 
+      {/* Journal Quick Actions */}
       <div
         style={{
           display: "grid",
           gridTemplateColumns: "1fr 1fr",
           gap: "1rem",
-          marginTop: "1.5rem",
+          marginBottom: "2rem",
         }}
       >
         {/* My Journals */}
@@ -29,8 +49,8 @@ export default function AuthorDashboard() {
             borderRadius: "12px",
           }}
         >
-          <h3 style={{ margin: "0 0 0.5rem", color: "#e2e8f0" }}>My Journals</h3>
-          <p style={{ fontSize: "0.88rem", color: "#94a3b8", margin: "0 0 1rem" }}>
+          <h3 style={{ margin: "0 0 0.5rem", color: "#1e293b" }}>My Journals</h3>
+          <p style={{ fontSize: "0.88rem", color: "#64748b", margin: "0 0 1rem" }}>
             View, edit, and publish your journal entries.
           </p>
           <button
@@ -60,17 +80,17 @@ export default function AuthorDashboard() {
             borderRadius: "12px",
           }}
         >
-          <h3 style={{ margin: "0 0 0.5rem", color: "#e2e8f0" }}>New Journal</h3>
-          <p style={{ fontSize: "0.88rem", color: "#94a3b8", margin: "0 0 1rem" }}>
+          <h3 style={{ margin: "0 0 0.5rem", color: "#1e293b" }}>New Journal</h3>
+          <p style={{ fontSize: "0.88rem", color: "#64748b", margin: "0 0 1rem" }}>
             Start a new research journal entry saved as a draft.
           </p>
           <button
             id="create-journal-dash-btn"
             onClick={() => navigate("/journals/create")}
             style={{
-              background: "rgba(34,197,94,0.15)",
-              color: "#86efac",
-              border: "1px solid rgba(34,197,94,0.3)",
+              background: "#16a34a",
+              color: "#ffffff",
+              border: "none",
               padding: "0.5rem 1.1rem",
               borderRadius: "7px",
               cursor: "pointer",
@@ -83,11 +103,8 @@ export default function AuthorDashboard() {
         </div>
       </div>
 
-      <div style={{ marginTop: "1.5rem" }}>
-        <Link to="/" style={{ color: "#818cf8", fontSize: "0.875rem" }}>
-          ← Back to Home
-        </Link>
-      </div>
+      {/* Author Invitation Section (Authors can invite unlimited other authors) */}
+      <InviteAuthorCard />
     </div>
   );
 }
