@@ -43,12 +43,18 @@ export async function registerUser({ name, email, password }) {
  * @param {{ email: string, password: string }} credentials
  * @returns {Promise<{ user: { id: string, name: string, email: string, role: string }, token: string }>}
  */
-export async function loginUser({ email, password }) {
-  const normalizedEmail = email.trim().toLowerCase();
+export async function loginUser({ email, identifier, password }) {
+  const loginHandle = (identifier || email || "").trim().toLowerCase();
 
-  const user = await User.findOne({ email: normalizedEmail }).select(
-    "+passwordHash +isActive"
-  );
+  if (!loginHandle) {
+    const error = new Error("INVALID_CREDENTIALS");
+    error.statusCode = 401;
+    throw error;
+  }
+
+  const user = await User.findOne({
+    $or: [{ email: loginHandle }, { username: loginHandle }],
+  }).select("+passwordHash +isActive");
 
   if (!user) {
     const error = new Error("INVALID_CREDENTIALS");
@@ -75,6 +81,7 @@ export async function loginUser({ email, password }) {
     user: {
       id: user._id.toString(),
       name: user.name,
+      username: user.username,
       email: user.email,
       role: user.role,
     },

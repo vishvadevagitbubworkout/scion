@@ -48,12 +48,11 @@ export function validateRegistrationInput(body = {}) {
  */
 export function validateLoginInput(body = {}) {
   const errors = [];
-  const { email, password } = body;
+  const { email, username, identifier, password } = body;
+  const loginHandle = identifier || email || username;
 
-  if (typeof email !== "string" || !email.trim()) {
-    errors.push("Email is required");
-  } else if (!EMAIL_REGEX.test(email.trim())) {
-    errors.push("A valid email address is required");
+  if (typeof loginHandle !== "string" || !loginHandle.trim()) {
+    errors.push("Email or username is required");
   }
 
   if (typeof password !== "string" || !password) {
@@ -63,6 +62,8 @@ export function validateLoginInput(body = {}) {
   return {
     errors,
     sanitized: {
+      identifier:
+        typeof loginHandle === "string" ? loginHandle.trim().toLowerCase() : "",
       email: typeof email === "string" ? email.trim().toLowerCase() : "",
       password: typeof password === "string" ? password : "",
     },

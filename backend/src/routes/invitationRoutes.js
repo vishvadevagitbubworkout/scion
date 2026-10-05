@@ -1,10 +1,11 @@
 import express from "express";
 import {
+  sendOtpHandler,
+  verifyOtpHandler,
   createInvitationHandler,
   getInvitationsHandler,
   revokeInvitationHandler,
   validateInvitationHandler,
-  verifyOtpHandler,
   completeSetupHandler,
 } from "../controllers/invitationController.js";
 import { authenticate } from "../middleware/authMiddleware.js";
@@ -14,12 +15,14 @@ const router = express.Router();
 
 // Public invitation validation & acceptance endpoints
 router.get("/validate", validateInvitationHandler);
-router.post("/verify-otp", verifyOtpHandler);
 router.post("/complete", completeSetupHandler);
 
-// Protected ROOT management endpoints
-router.post("/", authenticate, authorize("ROOT"), createInvitationHandler);
-router.get("/", authenticate, authorize("ROOT"), getInvitationsHandler);
-router.patch("/:id/revoke", authenticate, authorize("ROOT"), revokeInvitationHandler);
+// Protected ROOT and AUTHOR invitation endpoints (Unlimited author invitations)
+router.post("/send-otp", authenticate, authorize("ROOT", "AUTHOR"), sendOtpHandler);
+router.post("/verify-otp", authenticate, authorize("ROOT", "AUTHOR"), verifyOtpHandler);
+router.post("/", authenticate, authorize("ROOT", "AUTHOR"), createInvitationHandler);
+router.get("/", authenticate, authorize("ROOT", "AUTHOR"), getInvitationsHandler);
+router.patch("/:id/revoke", authenticate, authorize("ROOT", "AUTHOR"), revokeInvitationHandler);
+router.put("/:id/revoke", authenticate, authorize("ROOT", "AUTHOR"), revokeInvitationHandler);
 
 export default router;

@@ -70,6 +70,7 @@ export async function login(req, res) {
     }
 
     const { user, token } = await loginUser({
+      identifier: sanitized.identifier || sanitized.email,
       email: sanitized.email,
       password: sanitized.password,
     });

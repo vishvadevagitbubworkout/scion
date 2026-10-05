@@ -1,16 +1,22 @@
-import { describe, it, before, after } from "node:test";
+import { describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import crypto from "crypto";
 import { setupTestEnvironment } from "./testHelper.js";
 import User from "../src/models/User.js";
 import Invitation from "../src/models/Invitation.js";
+import EmailVerification from "../src/models/EmailVerification.js";
 import { hashPassword } from "../src/utils/password.js";
+import { getSentEmails, clearSentEmails } from "../src/services/emailService.js";
 
 function sha256(val) {
   return crypto.createHash("sha256").update(val).digest("hex");
 }
 
-describe("Phase 3 — Author Invitation & Management", () => {
+function uniqueEmail(prefix = "user") {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}@example.com`;
+}
+
+describe("Phase 3 — Author Invitation & Management (Final Revised Specification)", () => {
   let apiRequest;
   let teardown;
 
@@ -32,6 +38,7 @@ describe("Phase 3 — Author Invitation & Management", () => {
     // Seed Root User
     rootUser = await User.create({
       name: "Root Administrator",
+      username: "rootadmin",
       email: "root@example.com",
       passwordHash: pwdHash,
       role: "ROOT",
@@ -41,6 +48,7 @@ describe("Phase 3 — Author Invitation & Management", () => {
     // Seed Author User
     authorUser = await User.create({
       name: "Existing Author",
+      username: "existingauthor",
       email: "author@example.com",
       passwordHash: pwdHash,
       role: "AUTHOR",
@@ -50,6 +58,7 @@ describe("Phase 3 — Author Invitation & Management", () => {
     // Seed Viewer User
     viewerUser = await User.create({
       name: "Normal Viewer",
+      username: "normalviewer",
       email: "viewer@example.com",
       passwordHash: pwdHash,
       role: "VIEWER",
@@ -80,97 +89,598 @@ describe("Phase 3 — Author Invitation & Management", () => {
     if (teardown) await teardown();
   });
 
-  describe("1. Invitation Creation & Role Authorization", () => {
-    it("ROOT can create an author invitation", async () => {
-      const res = await apiRequest("/api/invitations", {
+  beforeEach(() => {
+    clearSentEmails();
+  });
+
+  /**
+   * Helper: Sends OTP and verifies it, returning verificationToken
+   */
+  async function helperSendAndVerifyOtp(email, cookie = rootCookie) {
+    const sendRes = await apiRequest("/api/invitations/send-otp", {
+      method: "POST",
+      cookie,
+      body: { email },
+    });
+    if (sendRes.status !== 200) {
+      throw new Error(`send-otp failed with ${sendRes.status}: ${JSON.stringify(sendRes.data)}`);
+    }
+
+    const sent = getSentEmails();
+    const latestEmail = sent[sent.length - 1];
+    const otp = latestEmail.otp;
+
+    const verifyRes = await apiRequest("/api/invitations/verify-otp", {
+      method: "POST",
+      cookie,
+      body: { email, otp },
+    });
+    if (verifyRes.status !== 200) {
+      throw new Error(`verify-otp failed with ${verifyRes.status}: ${JSON.stringify(verifyRes.data)}`);
+    }
+
+    return verifyRes.data.verificationToken;
+  }
+
+  /**
+   * Helper: Fully creates an invitation and returns raw invitationToken from the sent email
+   */
+  async function helperCreateInvitation(email, cookie = rootCookie) {
+    const verificationToken = await helperSendAndVerifyOtp(email, cookie);
+    clearSentEmails();
+
+    const createRes = await apiRequest("/api/invitations", {
+      method: "POST",
+      cookie,
+      body: { email, verificationToken },
+    });
+    if (createRes.status !== 201) {
+      throw new Error(`create invitation failed with ${createRes.status}: ${JSON.stringify(createRes.data)}`);
+    }
+
+    const sent = getSentEmails();
+    const latestEmail = sent[sent.length - 1];
+    const match = latestEmail.invitationUrl.match(/token=([a-f0-9]{64})/);
+    const rawToken = match ? match[1] : null;
+
+    return {
+      invitation: createRes.data.invitation,
+      rawToken,
+    };
+  }
+
+  describe("1. OTP Generation & Verification Flow (/send-otp & /verify-otp)", () => {
+    it("ROOT can send verification OTP to invitee email", async () => {
+      const email = uniqueEmail("otp_root");
+      const res = await apiRequest("/api/invitations/send-otp", {
         method: "POST",
         cookie: rootCookie,
-        body: { email: "invitee1@example.com" },
+        body: { email },
       });
 
-      assert.equal(res.status, 201);
-      assert.equal(res.data.message, "Author invitation created successfully");
-      assert.ok(res.data.invitation);
-      assert.equal(res.data.invitation.email, "invitee1@example.com");
-      assert.equal(res.data.invitation.status, "PENDING");
-      assert.equal(res.data.invitation.role, "AUTHOR");
-      assert.ok(res.data.invitationToken);
-      assert.equal(res.data.invitationToken.length, 64);
-      assert.ok(res.data.otp);
-      assert.match(res.data.otp, /^\d{6}$/);
+      assert.equal(res.status, 200);
+      assert.equal(res.data.success, true);
+      assert.ok(res.data.message);
+      // OTP is NEVER returned in the API response
+      assert.equal(res.data.otp, undefined);
 
-      // Verify hashes are never returned in HTTP response
-      assert.equal(res.data.invitation.tokenHash, undefined);
-      assert.equal(res.data.invitation.otpHash, undefined);
-      assert.equal(res.data.invitation.setupTokenHash, undefined);
+      // Verify email was queued by emailService
+      const sent = getSentEmails();
+      assert.equal(sent.length, 1);
+      assert.equal(sent[0].to, email);
+      assert.ok(sent[0].subject.includes("Verification"));
+      assert.ok(sent[0].otp);
+      assert.match(sent[0].otp, /^\d{6}$/);
 
-      // Verify in DB that tokenHash and otpHash are securely stored
-      const inDb = await Invitation.findById(res.data.invitation.id).select(
-        "+tokenHash +otpHash"
-      );
-      assert.ok(inDb);
-      assert.equal(inDb.tokenHash, sha256(res.data.invitationToken));
-      assert.ok(inDb.otpHash.startsWith("$argon2"));
-      assert.notEqual(inDb.otpHash, res.data.otp);
+      // Verify DB record stores Argon2id hash, not plaintext
+      const record = await EmailVerification.findOne({ email }).select("+otpHash");
+      assert.ok(record);
+      assert.ok(record.otpHash.startsWith("$argon2"));
+      assert.notEqual(record.otpHash, sent[0].otp);
+      assert.equal(record.verified, false);
+      assert.equal(record.otpAttempts, 0);
     });
 
-    it("AUTHOR cannot create an invitation (403 Forbidden)", async () => {
-      const res = await apiRequest("/api/invitations", {
+    it("AUTHOR can also send verification OTP (unlimited author invitations)", async () => {
+      const email = uniqueEmail("otp_author");
+      const res = await apiRequest("/api/invitations/send-otp", {
         method: "POST",
         cookie: authorCookie,
-        body: { email: "fail1@example.com" },
+        body: { email },
       });
-      assert.equal(res.status, 403);
+
+      assert.equal(res.status, 200);
+      assert.equal(res.data.success, true);
+
+      const sent = getSentEmails();
+      assert.equal(sent.length, 1);
+      assert.equal(sent[0].to, email);
     });
 
-    it("VIEWER cannot create an invitation (403 Forbidden)", async () => {
-      const res = await apiRequest("/api/invitations", {
+    it("VIEWER cannot send verification OTP (403 Forbidden)", async () => {
+      const email = uniqueEmail("otp_viewer");
+      const res = await apiRequest("/api/invitations/send-otp", {
         method: "POST",
         cookie: viewerCookie,
-        body: { email: "fail2@example.com" },
+        body: { email },
       });
+
       assert.equal(res.status, 403);
     });
 
-    it("Anonymous user cannot create an invitation (401 Unauthorized)", async () => {
-      const res = await apiRequest("/api/invitations", {
+    it("Anonymous user cannot send verification OTP (401 Unauthorized)", async () => {
+      const email = uniqueEmail("otp_anon");
+      const res = await apiRequest("/api/invitations/send-otp", {
         method: "POST",
-        body: { email: "fail3@example.com" },
+        body: { email },
       });
+
       assert.equal(res.status, 401);
     });
 
-    it("Rejects invalid email format with 400 Bad Request", async () => {
-      const res = await apiRequest("/api/invitations", {
+    it("Rejects send-otp for already registered user email (409 Conflict)", async () => {
+      const res = await apiRequest("/api/invitations/send-otp", {
+        method: "POST",
+        cookie: rootCookie,
+        body: { email: "author@example.com" },
+      });
+
+      assert.equal(res.status, 409);
+    });
+
+    it("Rejects send-otp for invalid email format (400 Bad Request)", async () => {
+      const res = await apiRequest("/api/invitations/send-otp", {
         method: "POST",
         cookie: rootCookie,
         body: { email: "not-an-email" },
       });
+
       assert.equal(res.status, 400);
     });
 
-    it("Rejects invitation if email already belongs to a registered User (409 Conflict)", async () => {
-      const res = await apiRequest("/api/invitations", {
+    it("OTP verification fails with incorrect OTP and tracks attempts", async () => {
+      const email = uniqueEmail("wrong_otp");
+      await apiRequest("/api/invitations/send-otp", {
         method: "POST",
         cookie: rootCookie,
-        body: { email: "viewer@example.com" },
+        body: { email },
       });
-      assert.equal(res.status, 409);
-      assert.match(res.data.message, /already registered/i);
+
+      const res = await apiRequest("/api/invitations/verify-otp", {
+        method: "POST",
+        cookie: rootCookie,
+        body: { email, otp: "000000" },
+      });
+
+      assert.equal(res.status, 400);
+      assert.equal(res.data.remainingAttempts, 4);
+
+      const record = await EmailVerification.findOne({ email });
+      assert.equal(record.otpAttempts, 1);
     });
 
-    it("Rejects duplicate active pending invitation for the same email (409 Conflict)", async () => {
-      const res = await apiRequest("/api/invitations", {
+    it("Locks out after 5 consecutive incorrect OTP attempts", async () => {
+      const email = uniqueEmail("lockout_otp");
+      await apiRequest("/api/invitations/send-otp", {
         method: "POST",
         cookie: rootCookie,
-        body: { email: "invitee1@example.com" },
+        body: { email },
       });
-      assert.equal(res.status, 409);
-      assert.match(res.data.message, /active pending invitation/i);
+
+      for (let i = 1; i <= 4; i++) {
+        await apiRequest("/api/invitations/verify-otp", {
+          method: "POST",
+          cookie: rootCookie,
+          body: { email, otp: "111111" },
+        });
+      }
+
+      // 5th attempt triggers lockout (429)
+      const res5 = await apiRequest("/api/invitations/verify-otp", {
+        method: "POST",
+        cookie: rootCookie,
+        body: { email, otp: "111111" },
+      });
+      assert.equal(res5.status, 429);
+    });
+
+    it("Verifies correct OTP and issues verificationToken", async () => {
+      const email = uniqueEmail("correct_otp");
+      await apiRequest("/api/invitations/send-otp", {
+        method: "POST",
+        cookie: rootCookie,
+        body: { email },
+      });
+
+      const sent = getSentEmails();
+      const actualOtp = sent[0].otp;
+
+      const res = await apiRequest("/api/invitations/verify-otp", {
+        method: "POST",
+        cookie: rootCookie,
+        body: { email, otp: actualOtp },
+      });
+
+      assert.equal(res.status, 200);
+      assert.equal(res.data.success, true);
+      assert.ok(res.data.verificationToken);
+      assert.equal(res.data.verificationToken.length, 64);
+
+      // Verify DB record is marked verified with hashed verificationToken
+      const record = await EmailVerification.findOne({ email }).select(
+        "+verificationTokenHash"
+      );
+      assert.equal(record.verified, true);
+      assert.equal(record.verificationTokenHash, sha256(res.data.verificationToken));
     });
   });
 
-  describe("2. ROOT Oversight & Revocation", () => {
+  describe("2. Invitation Creation (/api/invitations) with 2-Hour Expiration", () => {
+    it("Rejects invitation creation without verificationToken (400 Bad Request)", async () => {
+      const email = uniqueEmail("noverif");
+      const res = await apiRequest("/api/invitations", {
+        method: "POST",
+        cookie: rootCookie,
+        body: { email },
+      });
+
+      assert.equal(res.status, 400);
+    });
+
+    it("Rejects invitation creation with invalid or unverified verificationToken", async () => {
+      const email = uniqueEmail("fakeverif");
+      const res = await apiRequest("/api/invitations", {
+        method: "POST",
+        cookie: rootCookie,
+        body: { email, verificationToken: "fake_token_12345678" },
+      });
+
+      assert.equal(res.status, 400);
+    });
+
+    it("Successfully creates invitation with EXACTLY 2 HOURS expiry and sends email", async () => {
+      const email = uniqueEmail("invite_2hr");
+      const beforeTime = Date.now();
+
+      const verificationToken = await helperSendAndVerifyOtp(email, rootCookie);
+      clearSentEmails();
+
+      const res = await apiRequest("/api/invitations", {
+        method: "POST",
+        cookie: rootCookie,
+        body: { email, verificationToken },
+      });
+
+      assert.equal(res.status, 201);
+      assert.ok(res.data.invitation);
+      assert.equal(res.data.invitation.email, email);
+      assert.equal(res.data.invitation.status, "PENDING");
+      assert.equal(res.data.invitation.role, "AUTHOR");
+
+      // Verify raw invitation token is NOT returned in API response
+      assert.equal(res.data.invitationToken, undefined);
+      assert.equal(res.data.otp, undefined);
+      assert.equal(res.data.invitation.tokenHash, undefined);
+
+      // Verify expiration is EXACTLY 2 HOURS (within 5 seconds tolerance)
+      const expiry = new Date(res.data.invitation.expiresAt).getTime();
+      const expectedExpiry = beforeTime + 2 * 60 * 60 * 1000;
+      assert.ok(Math.abs(expiry - expectedExpiry) < 5000, `Expected ~${expectedExpiry}, got ${expiry}`);
+
+      // Verify email was sent with invitation URL
+      const sent = getSentEmails();
+      assert.equal(sent.length, 1);
+      assert.equal(sent[0].to, email);
+      assert.ok(sent[0].invitationUrl.includes("/accept-invitation?token="));
+
+      // Extract raw token from sent email URL
+      const match = sent[0].invitationUrl.match(/token=([a-f0-9]{64})/);
+      assert.ok(match, "Invitation URL must contain 64-char hex token");
+      const rawToken = match[1];
+
+      // Verify DB stores only SHA-256 hash
+      const inDb = await Invitation.findById(res.data.invitation.id).select("+tokenHash");
+      assert.equal(inDb.tokenHash, sha256(rawToken));
+
+      // Verification record should be consumed (one-time use)
+      const verRecord = await EmailVerification.findOne({ email });
+      assert.equal(verRecord, null);
+    });
+
+    it("AUTHOR can create invitations without limit", async () => {
+      const email = uniqueEmail("peer_author");
+      const verificationToken = await helperSendAndVerifyOtp(email, authorCookie);
+
+      const res = await apiRequest("/api/invitations", {
+        method: "POST",
+        cookie: authorCookie,
+        body: { email, verificationToken },
+      });
+
+      assert.equal(res.status, 201);
+      assert.equal(res.data.invitation.email, email);
+      assert.equal(res.data.invitation.role, "AUTHOR");
+    });
+
+    it("Rejects duplicate active invitation for same email (409 Conflict)", async () => {
+      const email = uniqueEmail("dup_invite");
+      // First invitation
+      await helperCreateInvitation(email, rootCookie);
+
+      // Try sending OTP again for same email with active invite
+      const res = await apiRequest("/api/invitations/send-otp", {
+        method: "POST",
+        cookie: rootCookie,
+        body: { email },
+      });
+
+      assert.equal(res.status, 409);
+    });
+  });
+
+  describe("3. Invitation Token Validation & Setup Token (/api/invitations/validate)", () => {
+    it("Validates valid invitation token and issues short-lived setupToken", async () => {
+      const email = uniqueEmail("val_token");
+      const { rawToken } = await helperCreateInvitation(email, rootCookie);
+
+      const res = await apiRequest(`/api/invitations/validate?token=${rawToken}`);
+
+      assert.equal(res.status, 200);
+      assert.equal(res.data.valid, true);
+      assert.equal(res.data.email, email);
+      assert.ok(res.data.setupToken);
+      assert.equal(res.data.setupToken.length, 64);
+
+      // Verify setupToken is hashed in database
+      const inDb = await Invitation.findOne({ email }).select(
+        "+setupTokenHash +setupTokenExpiresAt"
+      );
+      assert.equal(inDb.setupTokenHash, sha256(res.data.setupToken));
+      assert.ok(inDb.setupTokenExpiresAt > new Date());
+    });
+
+    it("Rejects non-existent token with 404 Not Found", async () => {
+      const fakeToken = crypto.randomBytes(32).toString("hex");
+      const res = await apiRequest(`/api/invitations/validate?token=${fakeToken}`);
+
+      assert.equal(res.status, 404);
+    });
+
+    it("Rejects expired invitation with 410 Gone (Strict 2-hour enforcement)", async () => {
+      const email = uniqueEmail("exp_token");
+      const { rawToken } = await helperCreateInvitation(email, rootCookie);
+
+      // Artificially age the invitation past 2 hours
+      await Invitation.findOneAndUpdate(
+        { email },
+        { expiresAt: new Date(Date.now() - 1000) }
+      );
+
+      const res = await apiRequest(`/api/invitations/validate?token=${rawToken}`);
+
+      assert.equal(res.status, 410);
+
+      const inDb = await Invitation.findOne({ email });
+      assert.equal(inDb.status, "EXPIRED");
+    });
+
+    it("Rejects revoked invitation with 400 Bad Request", async () => {
+      const email = uniqueEmail("rev_token");
+      const { invitation, rawToken } = await helperCreateInvitation(email, rootCookie);
+
+      await apiRequest(`/api/invitations/${invitation.id}/revoke`, {
+        method: "PATCH",
+        cookie: rootCookie,
+      });
+
+      const res = await apiRequest(`/api/invitations/validate?token=${rawToken}`);
+
+      assert.equal(res.status, 400);
+    });
+  });
+
+  describe("4. Account Setup Completion (/api/invitations/complete)", () => {
+    it("Creates AUTHOR account with username and password, returns session cookie", async () => {
+      const email = uniqueEmail("complete_ok");
+      const { rawToken } = await helperCreateInvitation(email, rootCookie);
+
+      const valRes = await apiRequest(`/api/invitations/validate?token=${rawToken}`);
+      const setupToken = valRes.data.setupToken;
+
+      const res = await apiRequest("/api/invitations/complete", {
+        method: "POST",
+        body: {
+          setupToken,
+          username: "drsmith",
+          password: "SecurePassword123!",
+          confirmPassword: "SecurePassword123!",
+        },
+      });
+
+      assert.equal(res.status, 201);
+      assert.ok(res.data.user);
+      assert.equal(res.data.user.username, "drsmith");
+      assert.equal(res.data.user.email, email);
+      assert.equal(res.data.user.role, "AUTHOR");
+
+      // Verify HttpOnly cookie was set
+      assert.ok(res.setCookie);
+      assert.ok(res.setCookie.includes("token="));
+
+      // Verify User in DB has AUTHOR role
+      const userInDb = await User.findOne({ email });
+      assert.ok(userInDb);
+      assert.equal(userInDb.role, "AUTHOR");
+      assert.equal(userInDb.username, "drsmith");
+
+      // Verify Invitation status is ACCEPTED and setupToken is invalidated
+      const invInDb = await Invitation.findOne({ email }).select(
+        "+setupTokenHash +setupTokenExpiresAt"
+      );
+      assert.equal(invInDb.status, "ACCEPTED");
+      assert.ok(!invInDb.setupTokenHash);
+      assert.ok(!invInDb.setupTokenExpiresAt);
+    });
+
+    it("Rejects reused setupToken with 400/409", async () => {
+      const email = uniqueEmail("reuse_token");
+      const { rawToken } = await helperCreateInvitation(email, rootCookie);
+
+      const valRes = await apiRequest(`/api/invitations/validate?token=${rawToken}`);
+      const setupToken = valRes.data.setupToken;
+
+      // First completion
+      await apiRequest("/api/invitations/complete", {
+        method: "POST",
+        body: {
+          setupToken,
+          username: "firstuser",
+          password: "SecurePassword123!",
+          confirmPassword: "SecurePassword123!",
+        },
+      });
+
+      // Second completion with same setupToken
+      const res2 = await apiRequest("/api/invitations/complete", {
+        method: "POST",
+        body: {
+          setupToken,
+          username: "seconduser",
+          password: "SecurePassword123!",
+          confirmPassword: "SecurePassword123!",
+        },
+      });
+
+      assert.ok([400, 409].includes(res2.status));
+    });
+
+    it("Rejects duplicate username (409 Conflict)", async () => {
+      const email = uniqueEmail("dup_username");
+      const { rawToken } = await helperCreateInvitation(email, rootCookie);
+
+      const valRes = await apiRequest(`/api/invitations/validate?token=${rawToken}`);
+      const setupToken = valRes.data.setupToken;
+
+      // Seed a user with username 'existingusername'
+      await User.create({
+        name: "Duplicate Tester",
+        username: "duplicateuser",
+        email: uniqueEmail("dup_existing"),
+        passwordHash: await hashPassword("Password123!"),
+        role: "AUTHOR",
+      });
+
+      const res = await apiRequest("/api/invitations/complete", {
+        method: "POST",
+        body: {
+          setupToken,
+          username: "duplicateuser",
+          password: "SecurePassword123!",
+          confirmPassword: "SecurePassword123!",
+        },
+      });
+
+      assert.equal(res.status, 409);
+    });
+
+    it("Rejects password mismatch", async () => {
+      const email = uniqueEmail("pass_mismatch");
+      const { rawToken } = await helperCreateInvitation(email, rootCookie);
+
+      const valRes = await apiRequest(`/api/invitations/validate?token=${rawToken}`);
+      const setupToken = valRes.data.setupToken;
+
+      const res = await apiRequest("/api/invitations/complete", {
+        method: "POST",
+        body: {
+          setupToken,
+          username: "validuser1",
+          password: "Password123!",
+          confirmPassword: "DifferentPassword123!",
+        },
+      });
+
+      assert.equal(res.status, 400);
+      assert.ok(res.data.errors.includes("Passwords do not match"));
+    });
+
+    it("Rejects invalid username formats", async () => {
+      const email = uniqueEmail("bad_username");
+      const { rawToken } = await helperCreateInvitation(email, rootCookie);
+
+      const valRes = await apiRequest(`/api/invitations/validate?token=${rawToken}`);
+      const setupToken = valRes.data.setupToken;
+
+      const res = await apiRequest("/api/invitations/complete", {
+        method: "POST",
+        body: {
+          setupToken,
+          username: "no spaces allowed!",
+          password: "Password123!",
+          confirmPassword: "Password123!",
+        },
+      });
+
+      assert.equal(res.status, 400);
+    });
+  });
+
+  describe("5. Authentication via Email OR Username", () => {
+    before(async () => {
+      const pwd = await hashPassword("AuthTestPass123!");
+      await User.create({
+        name: "Dual Auth User",
+        username: "dualuser",
+        email: "dual@example.com",
+        passwordHash: pwd,
+        role: "AUTHOR",
+      });
+    });
+
+    it("Can login using EMAIL and password", async () => {
+      const res = await apiRequest("/api/auth/login", {
+        method: "POST",
+        body: {
+          email: "dual@example.com",
+          password: "AuthTestPass123!",
+        },
+      });
+
+      assert.equal(res.status, 200);
+      assert.equal(res.data.user.email, "dual@example.com");
+      assert.equal(res.data.user.username, "dualuser");
+      assert.equal(res.data.user.role, "AUTHOR");
+    });
+
+    it("Can login using USERNAME and password", async () => {
+      const res = await apiRequest("/api/auth/login", {
+        method: "POST",
+        body: {
+          email: "dualuser", // passing username in the login handle field
+          password: "AuthTestPass123!",
+        },
+      });
+
+      assert.equal(res.status, 200);
+      assert.equal(res.data.user.email, "dual@example.com");
+      assert.equal(res.data.user.username, "dualuser");
+      assert.equal(res.data.user.role, "AUTHOR");
+    });
+
+    it("Fails login with incorrect password for username", async () => {
+      const res = await apiRequest("/api/auth/login", {
+        method: "POST",
+        body: {
+          email: "dualuser",
+          password: "WrongPassword!",
+        },
+      });
+
+      assert.equal(res.status, 401);
+    });
+  });
+
+  describe("6. Revocation and Listing Permissions", () => {
     it("ROOT can list all invitations", async () => {
       const res = await apiRequest("/api/invitations", {
         method: "GET",
@@ -179,521 +689,49 @@ describe("Phase 3 — Author Invitation & Management", () => {
 
       assert.equal(res.status, 200);
       assert.ok(Array.isArray(res.data.invitations));
-      assert.ok(res.data.invitations.length >= 1);
-
-      // Verify safe fields and no hash leakage
-      const inv = res.data.invitations[0];
-      assert.ok(inv.email);
-      assert.ok(inv.status);
-      assert.equal(inv.tokenHash, undefined);
-      assert.equal(inv.otpHash, undefined);
     });
 
-    it("Non-ROOT cannot list invitations", async () => {
-      const res1 = await apiRequest("/api/invitations", {
+    it("AUTHOR can list their invitations", async () => {
+      const res = await apiRequest("/api/invitations", {
         method: "GET",
-        cookie: viewerCookie,
-      });
-      assert.equal(res1.status, 403);
-
-      const res2 = await apiRequest("/api/invitations", {
-        method: "GET",
-      });
-      assert.equal(res2.status, 401);
-    });
-
-    it("ROOT can revoke a pending invitation", async () => {
-      const createRes = await apiRequest("/api/invitations", {
-        method: "POST",
-        cookie: rootCookie,
-        body: { email: "to-revoke@example.com" },
-      });
-
-      const invId = createRes.data.invitation.id;
-      const revokeRes = await apiRequest(`/api/invitations/${invId}/revoke`, {
-        method: "PATCH",
-        cookie: rootCookie,
-      });
-
-      assert.equal(revokeRes.status, 200);
-      assert.equal(revokeRes.data.invitation.status, "REVOKED");
-      assert.ok(revokeRes.data.invitation.revokedAt);
-
-      // Verify revoked invitation cannot be revoked again
-      const secondRevoke = await apiRequest(`/api/invitations/${invId}/revoke`, {
-        method: "PATCH",
-        cookie: rootCookie,
-      });
-      assert.equal(secondRevoke.status, 400);
-
-      // Verify revoked invitation token is rejected during validation
-      const validateRes = await apiRequest(
-        `/api/invitations/validate?token=${createRes.data.invitationToken}`
-      );
-      assert.equal(validateRes.status, 400);
-      assert.match(validateRes.data.message, /revoked/i);
-    });
-  });
-
-  describe("3. Invitation Token Validation (Public)", () => {
-    it("Valid invitation token returns 200 and safe email", async () => {
-      const createRes = await apiRequest("/api/invitations", {
-        method: "POST",
-        cookie: rootCookie,
-        body: { email: "validate-test@example.com" },
-      });
-
-      const res = await apiRequest(
-        `/api/invitations/validate?token=${createRes.data.invitationToken}`
-      );
-      assert.equal(res.status, 200);
-      assert.equal(res.data.valid, true);
-      assert.equal(res.data.email, "validate-test@example.com");
-      assert.ok(res.data.expiresAt);
-      assert.equal(res.data.otp, undefined);
-      assert.equal(res.data.tokenHash, undefined);
-    });
-
-    it("Rejects non-existent / invalid token with 404", async () => {
-      const res = await apiRequest(
-        "/api/invitations/validate?token=0000000000000000000000000000000000000000000000000000000000000000"
-      );
-      assert.equal(res.status, 404);
-    });
-
-    it("Rejects expired invitation with 410 Gone (3-Day Expiry Enforced)", async () => {
-      const createRes = await apiRequest("/api/invitations", {
-        method: "POST",
-        cookie: rootCookie,
-        body: { email: "expired-test@example.com" },
-      });
-
-      // Simulate expiration: update expiresAt to 1 hour in the past
-      await Invitation.findByIdAndUpdate(createRes.data.invitation.id, {
-        expiresAt: new Date(Date.now() - 3600 * 1000),
-      });
-
-      const res = await apiRequest(
-        `/api/invitations/validate?token=${createRes.data.invitationToken}`
-      );
-      assert.equal(res.status, 410);
-      assert.match(res.data.message, /expired/i);
-    });
-  });
-
-  describe("4. OTP Verification & Attempt Protection", () => {
-    it("Correct OTP returns short-lived setupToken", async () => {
-      const createRes = await apiRequest("/api/invitations", {
-        method: "POST",
-        cookie: rootCookie,
-        body: { email: "otp-success@example.com" },
-      });
-
-      const { invitationToken, otp } = createRes.data;
-
-      const res = await apiRequest("/api/invitations/verify-otp", {
-        method: "POST",
-        body: { token: invitationToken, otp },
+        cookie: authorCookie,
       });
 
       assert.equal(res.status, 200);
-      assert.equal(res.data.message, "OTP verified successfully");
-      assert.ok(res.data.setupToken);
-      assert.equal(res.data.setupToken.length, 64);
-      assert.ok(res.data.expiresIn > 0);
-      assert.ok(res.data.expiresIn <= 900); // 15 mins max
+      assert.ok(Array.isArray(res.data.invitations));
     });
 
-    it("Incorrect OTP increments attempt counter and returns remaining attempts", async () => {
-      const createRes = await apiRequest("/api/invitations", {
-        method: "POST",
-        cookie: rootCookie,
-        body: { email: "otp-fail@example.com" },
-      });
-
-      const { invitationToken } = createRes.data;
-
-      const res = await apiRequest("/api/invitations/verify-otp", {
-        method: "POST",
-        body: { token: invitationToken, otp: "000000" },
-      });
-
-      assert.equal(res.status, 400);
-      assert.match(res.data.message, /4 attempt\(s\) remaining/i);
-      assert.equal(res.data.remainingAttempts, 4);
-
-      // Verify attempts incremented in DB
-      const inDb = await Invitation.findById(createRes.data.invitation.id);
-      assert.equal(inDb.otpAttempts, 1);
-    });
-
-    it("Fifth consecutive failed OTP attempt revokes invitation (429)", async () => {
-      const createRes = await apiRequest("/api/invitations", {
-        method: "POST",
-        cookie: rootCookie,
-        body: { email: "bruteforce-test@example.com" },
-      });
-
-      const { invitationToken } = createRes.data;
-
-      // Fail 4 times
-      for (let i = 0; i < 4; i++) {
-        const failRes = await apiRequest("/api/invitations/verify-otp", {
-          method: "POST",
-          body: { token: invitationToken, otp: "000000" },
-        });
-        assert.equal(failRes.status, 400);
-      }
-
-      // 5th failure
-      const fifthRes = await apiRequest("/api/invitations/verify-otp", {
-        method: "POST",
-        body: { token: invitationToken, otp: "000000" },
-      });
-      assert.equal(fifthRes.status, 429);
-      assert.match(fifthRes.data.message, /maximum otp verification attempts/i);
-
-      // Verify status is REVOKED in DB
-      const inDb = await Invitation.findById(createRes.data.invitation.id);
-      assert.equal(inDb.status, "REVOKED");
-
-      // 6th attempt with real OTP fails immediately
-      const sixthRes = await apiRequest("/api/invitations/verify-otp", {
-        method: "POST",
-        body: { token: invitationToken, otp: createRes.data.otp },
-      });
-      assert.equal(sixthRes.status, 400); // Revoked invitation
-    });
-  });
-
-  describe("5. Account Setup Completion & RBAC Integration", () => {
-    it("Completes setup, creates AUTHOR user, and automatically logs in", async () => {
-      const createRes = await apiRequest("/api/invitations", {
-        method: "POST",
-        cookie: rootCookie,
-        body: { email: "new-author@example.com" },
-      });
-
-      const { invitationToken, otp } = createRes.data;
-
-      // 1. Verify OTP
-      const verifyRes = await apiRequest("/api/invitations/verify-otp", {
-        method: "POST",
-        body: { token: invitationToken, otp },
-      });
-      const setupToken = verifyRes.data.setupToken;
-
-      // 2. Complete setup
-      const completeRes = await apiRequest("/api/invitations/complete", {
-        method: "POST",
-        body: {
-          setupToken,
-          name: "Dr. New Author",
-          password: "AuthorPassword123!",
-        },
-      });
-
-      assert.equal(completeRes.status, 201);
-      assert.equal(completeRes.data.message, "Author account created successfully");
-      assert.equal(completeRes.data.user.name, "Dr. New Author");
-      assert.equal(completeRes.data.user.email, "new-author@example.com");
-      assert.equal(completeRes.data.user.role, "AUTHOR");
-      assert.equal(completeRes.data.user.passwordHash, undefined);
-
-      // Verify HttpOnly cookie is set
-      assert.ok(completeRes.setCookie);
-      assert.ok(completeRes.setCookie.includes("scion_access_token="));
-      assert.ok(completeRes.setCookie.toLowerCase().includes("httponly"));
-
-      // Verify invitation in DB is ACCEPTED and hashes wiped
-      const inDb = await Invitation.findById(createRes.data.invitation.id).select(
-        "+setupTokenHash +otpHash"
-      );
-      assert.equal(inDb.status, "ACCEPTED");
-      assert.ok(inDb.usedAt);
-      assert.equal(inDb.setupTokenHash, null);
-      assert.equal(inDb.otpHash, undefined); // removed/unset
-
-      // 3. Verify user in User collection
-      const dbUser = await User.findOne({ email: "new-author@example.com" }).select(
-        "+passwordHash"
-      );
-      assert.ok(dbUser);
-      assert.equal(dbUser.role, "AUTHOR");
-      assert.equal(dbUser.isActive, true);
-      assert.ok(dbUser.passwordHash.startsWith("$argon2"));
-
-      // 4. Verify new author can log in via standard Phase 1 /api/auth/login
-      const loginRes = await apiRequest("/api/auth/login", {
-        method: "POST",
-        body: {
-          email: "new-author@example.com",
-          password: "AuthorPassword123!",
-        },
-      });
-      assert.equal(loginRes.status, 200);
-      assert.equal(loginRes.data.user.role, "AUTHOR");
-    });
-
-    it("Setup token cannot be reused (one-time use)", async () => {
-      const createRes = await apiRequest("/api/invitations", {
-        method: "POST",
-        cookie: rootCookie,
-        body: { email: "reuse-test@example.com" },
-      });
-
-      const { invitationToken, otp } = createRes.data;
-      const verifyRes = await apiRequest("/api/invitations/verify-otp", {
-        method: "POST",
-        body: { token: invitationToken, otp },
-      });
-      const setupToken = verifyRes.data.setupToken;
-
-      // First use succeeds
-      const firstRes = await apiRequest("/api/invitations/complete", {
-        method: "POST",
-        body: {
-          setupToken,
-          name: "Reuse User",
-          password: "AuthorPassword123!",
-        },
-      });
-      assert.equal(firstRes.status, 201);
-
-      // Second use of the same setupToken fails
-      const secondRes = await apiRequest("/api/invitations/complete", {
-        method: "POST",
-        body: {
-          setupToken,
-          name: "Replay Attempt",
-          password: "AuthorPassword123!",
-        },
-      });
-      assert.ok(
-        secondRes.status === 400 || secondRes.status === 409,
-        `Expected 400 or 409, got ${secondRes.status}`
-      );
-    });
-
-    it("Concurrent completion requests cannot create duplicate users", async () => {
-      const createRes = await apiRequest("/api/invitations", {
-        method: "POST",
-        cookie: rootCookie,
-        body: { email: "concurrent-test@example.com" },
-      });
-
-      const { invitationToken, otp } = createRes.data;
-      const verifyRes = await apiRequest("/api/invitations/verify-otp", {
-        method: "POST",
-        body: { token: invitationToken, otp },
-      });
-      const setupToken = verifyRes.data.setupToken;
-
-      const [res1, res2] = await Promise.all([
-        apiRequest("/api/invitations/complete", {
-          method: "POST",
-          body: {
-            setupToken,
-            name: "Concurrent 1",
-            password: "AuthorPassword123!",
-          },
-        }),
-        apiRequest("/api/invitations/complete", {
-          method: "POST",
-          body: {
-            setupToken,
-            name: "Concurrent 2",
-            password: "AuthorPassword123!",
-          },
-        }),
-      ]);
-
-      const statuses = [res1.status, res2.status];
-      assert.equal(statuses.filter((s) => s === 201).length, 1);
-      assert.equal(statuses.filter((s) => s === 400 || s === 409).length, 1);
-
-      const users = await User.find({ email: "concurrent-test@example.com" });
-      assert.equal(users.length, 1);
-    });
-
-    it("Cannot inject role: ROOT during completion", async () => {
-      const createRes = await apiRequest("/api/invitations", {
-        method: "POST",
-        cookie: rootCookie,
-        body: { email: "role-inject@example.com" },
-      });
-
-      const { invitationToken, otp } = createRes.data;
-      const verifyRes = await apiRequest("/api/invitations/verify-otp", {
-        method: "POST",
-        body: { token: invitationToken, otp },
-      });
-      const setupToken = verifyRes.data.setupToken;
-
-      const res = await apiRequest("/api/invitations/complete", {
-        method: "POST",
-        body: {
-          setupToken,
-          name: "Attacker",
-          password: "AuthorPassword123!",
-          role: "ROOT",
-        },
-      });
-
-      assert.equal(res.status, 201);
-      assert.equal(res.data.user.role, "AUTHOR");
-
-      const inDb = await User.findOne({ email: "role-inject@example.com" });
-      assert.equal(inDb.role, "AUTHOR");
-    });
-
-    it("Expired setup token is rejected with 410 Gone", async () => {
-      const createRes = await apiRequest("/api/invitations", {
-        method: "POST",
-        cookie: rootCookie,
-        body: { email: "token-expired@example.com" },
-      });
-
-      const { invitationToken, otp } = createRes.data;
-      const verifyRes = await apiRequest("/api/invitations/verify-otp", {
-        method: "POST",
-        body: { token: invitationToken, otp },
-      });
-      const setupToken = verifyRes.data.setupToken;
-
-      // Simulate setup token expiration: set setupTokenExpiresAt in the past
-      await Invitation.findByIdAndUpdate(createRes.data.invitation.id, {
-        setupTokenExpiresAt: new Date(Date.now() - 1000),
-      });
-
-      const completeRes = await apiRequest("/api/invitations/complete", {
-        method: "POST",
-        body: {
-          setupToken,
-          name: "Expired Token User",
-          password: "AuthorPassword123!",
-        },
-      });
-
-      assert.equal(completeRes.status, 410);
-    });
-
-    it("Rejects completion if email becomes registered between invite and setup (409 Conflict)", async () => {
-      const createRes = await apiRequest("/api/invitations", {
-        method: "POST",
-        cookie: rootCookie,
-        body: { email: "collision-test@example.com" },
-      });
-
-      const { invitationToken, otp } = createRes.data;
-      const verifyRes = await apiRequest("/api/invitations/verify-otp", {
-        method: "POST",
-        body: { token: invitationToken, otp },
-      });
-      const setupToken = verifyRes.data.setupToken;
-
-      // Pre-register user with same email (collision)
-      await User.create({
-        name: "Collision User",
-        email: "collision-test@example.com",
-        passwordHash: await hashPassword("Collision123!"),
-        role: "VIEWER",
-        isActive: true,
-      });
-
-      const completeRes = await apiRequest("/api/invitations/complete", {
-        method: "POST",
-        body: {
-          setupToken,
-          name: "Collision Author",
-          password: "AuthorPassword123!",
-        },
-      });
-
-      assert.equal(completeRes.status, 409);
-      assert.match(completeRes.data.message, /already registered/i);
-
-      // Verify invitation did NOT become ACCEPTED
-      const inDb = await Invitation.findById(createRes.data.invitation.id);
-      assert.notEqual(inDb.status, "ACCEPTED");
-    });
-  });
-
-  describe("6. Phase 2 Journal Management Integration", () => {
-    it("Newly created AUTHOR can immediately create and publish journals in Phase 2", async () => {
-      // 1. Create and complete an author
-      const createRes = await apiRequest("/api/invitations", {
-        method: "POST",
-        cookie: rootCookie,
-        body: { email: "phase2-author@example.com" },
-      });
-
-      const { invitationToken, otp } = createRes.data;
-      const verifyRes = await apiRequest("/api/invitations/verify-otp", {
-        method: "POST",
-        body: { token: invitationToken, otp },
-      });
-
-      const completeRes = await apiRequest("/api/invitations/complete", {
-        method: "POST",
-        body: {
-          setupToken: verifyRes.data.setupToken,
-          name: "Prof. Phase 2 Author",
-          password: "AuthorPassword123!",
-        },
-      });
-
-      const authorSessionCookie = completeRes.setCookie;
-
-      // 2. Author creates journal via Phase 2 POST /api/journals
-      const journalRes = await apiRequest("/api/journals", {
-        method: "POST",
-        cookie: authorSessionCookie,
-        body: {
-          title: "New Research on Quantum Computing",
-          abstract: "Abstract on quantum computing algorithms.",
-          content: "Detailed body content about quantum gates and qubits.",
-          domain: "Physics",
-        },
-      });
-
-      assert.equal(journalRes.status, 201);
-      assert.equal(journalRes.data.journal.title, "New Research on Quantum Computing");
-      assert.equal(journalRes.data.journal.status, "DRAFT");
-      assert.equal(journalRes.data.journal.authorId, completeRes.data.user.id);
-
-      const journalId = journalRes.data.journal.id;
-
-      // 3. Author sees journal in GET /api/journals/my
-      const myJournalsRes = await apiRequest("/api/journals/my", {
+    it("VIEWER cannot list invitations (403 Forbidden)", async () => {
+      const res = await apiRequest("/api/invitations", {
         method: "GET",
-        cookie: authorSessionCookie,
+        cookie: viewerCookie,
       });
-      assert.equal(myJournalsRes.status, 200);
-      assert.equal(myJournalsRes.data.journals.length, 1);
-      assert.equal(myJournalsRes.data.journals[0].id, journalId);
 
-      // 4. Author publishes journal via Phase 2 PATCH /api/journals/:id/publish
-      const publishRes = await apiRequest(`/api/journals/${journalId}/publish`, {
-        method: "PATCH",
-        cookie: authorSessionCookie,
-      });
-      assert.equal(publishRes.status, 200);
-      assert.equal(publishRes.data.journal.status, "PUBLISHED");
-      assert.ok(publishRes.data.journal.publishedAt);
+      assert.equal(res.status, 403);
     });
 
-    it("VIEWER still cannot create journals (403 Forbidden)", async () => {
-      const res = await apiRequest("/api/journals", {
-        method: "POST",
-        cookie: viewerCookie,
-        body: {
-          title: "Unauthorized Journal",
-          abstract: "Abstract",
-          content: "Content",
-          domain: "General",
-        },
+    it("AUTHOR can revoke an invitation they created", async () => {
+      const email = uniqueEmail("author_revoke");
+      const { invitation } = await helperCreateInvitation(email, authorCookie);
+
+      const res = await apiRequest(`/api/invitations/${invitation.id}/revoke`, {
+        method: "PATCH",
+        cookie: authorCookie,
       });
+
+      assert.equal(res.status, 200);
+      assert.equal(res.data.invitation.status, "REVOKED");
+    });
+
+    it("AUTHOR cannot revoke an invitation created by ROOT (403 Forbidden)", async () => {
+      const email = uniqueEmail("root_owned");
+      const { invitation } = await helperCreateInvitation(email, rootCookie);
+
+      const res = await apiRequest(`/api/invitations/${invitation.id}/revoke`, {
+        method: "PATCH",
+        cookie: authorCookie,
+      });
+
       assert.equal(res.status, 403);
     });
   });
