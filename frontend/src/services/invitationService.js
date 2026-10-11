@@ -1,5 +1,6 @@
 const API_BASE_URL =
-  import.meta.env.VITE_API_URL || "http://localhost:5000/api";
+  import.meta.env.VITE_API_URL
+  || (import.meta.env.DEV ? "http://localhost:5000/api" : "/api");
 
 /**
  * Common request helper with credentials: "include" for HttpOnly cookies.
@@ -88,22 +89,27 @@ export const invitationService = {
    * @param {string} token
    */
   async validateInvitation(token) {
-    return await request(
-      `/invitations/validate?token=${encodeURIComponent(token)}`,
-      {
-        method: "GET",
-      }
-    );
+    return await request("/invitations/validate", {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    });
   },
 
   /**
-   * Public completion of author account setup with setupToken, username, and password.
-   * @param {{ setupToken: string, username: string, password: string, confirmPassword?: string }} payload
+   * Public completion of author setup. The setup authorization is an HttpOnly cookie.
+   * @param {{ fullName: string, displayName: string, username: string, password: string, confirmPassword: string, bio?: string }} payload
    */
-  async completeSetup({ setupToken, username, password, confirmPassword }) {
+  async completeSetup({ fullName, displayName, username, password, confirmPassword, bio }) {
     return await request("/invitations/complete", {
       method: "POST",
-      body: JSON.stringify({ setupToken, username, password, confirmPassword }),
+      body: JSON.stringify({
+        fullName,
+        displayName,
+        username,
+        password,
+        confirmPassword,
+        bio,
+      }),
     });
   },
 };

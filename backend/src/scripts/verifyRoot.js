@@ -1,7 +1,22 @@
 import 'dotenv/config';
 import mongoose from 'mongoose';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import User from '../models/User.js';
 import { verifyPassword } from '../utils/password.js';
+
+export async function verifyRootAccount({ rootEmail, rootPassword }) {
+  const normalizedEmail = rootEmail?.trim().toLowerCase();
+  if (!normalizedEmail || !rootPassword) {
+    throw new Error("ROOT_EMAIL and ROOT_PASSWORD are required");
+  }
+
+  const user = await User.findOne({ email: normalizedEmail }).select('+passwordHash');
+  if (!user) return false;
+  return user.role === 'ROOT'
+    && user.isActive === true
+    && await verifyPassword(rootPassword, user.passwordHash);
+}
 
 const MONGODB_URI = process.env.MONGODB_URI;
 const ROOT_EMAIL = process.env.ROOT_EMAIL;
@@ -9,28 +24,24 @@ const ROOT_PASSWORD = process.env.ROOT_PASSWORD;
 
 async function verifyRoot() {
   try {
-    await mongoose.connect(MONGODB_URI);
-    console.log('--- Verification Test ---');
-
-    const user = await User.findOne({ email: ROOT_EMAIL }).select('+passwordHash');
-    
-    if (!user) {
-      console.log('Result: FAIL - User not found.');
-      process.exit(1);
+    if (!MONGODB_URI || !ROOT_EMAIL || !ROOT_PASSWORD) {
+      throw new Error("MONGODB_URI, ROOT_EMAIL, and ROOT_PASSWORD must be configured privately");
     }
-    
-    console.log(`User exists: YES (${user.email})`);
-    console.log(`Role is ROOT: ${user.role === 'ROOT' ? 'YES' : 'NO (' + user.role + ')'}`);
-    console.log(`isActive is true: ${user.isActive === true ? 'YES' : 'NO'}`);
-
-    const isPasswordValid = await verifyPassword(ROOT_PASSWORD, user.passwordHash);
-    console.log(`Password authenticates successfully: ${isPasswordValid ? 'YES' : 'NO'}`);
-
-  } catch (error) {
-    console.error('Error during verification:', error);
+    await mongoose.connect(MONGODB_URI);
+    const verified = await verifyRootAccount({
+      rootEmail: ROOT_EMAIL,
+      rootPassword: ROOT_PASSWORD,
+    });
+    console.log(`ROOT verification: ${verified ? "PASS" : "FAIL"}`);
+    if (!verified) process.exitCode = 1;
+  } catch {
+    console.error("ROOT verification could not be completed");
+    process.exitCode = 1;
   } finally {
-    await mongoose.disconnect();
+    if (mongoose.connection.readyState !== 0) await mongoose.disconnect();
   }
 }
 
-verifyRoot();
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  verifyRoot();
+}

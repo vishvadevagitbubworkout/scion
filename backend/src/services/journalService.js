@@ -36,7 +36,7 @@ export async function createJournal({ title, abstract, content, domain, authorId
  */
 export async function getJournalById(id) {
   if (!isValidId(id)) return null;
-  return Journal.findById(id).populate("authorId", "name");
+  return Journal.findById(id).populate("authorId", "name displayName");
 }
 
 /**
@@ -101,8 +101,34 @@ export async function publishJournal(id) {
  * The status filter is enforced at the database level — drafts are never included.
  * @returns {Promise<Document[]>}
  */
-export async function getPublishedJournals() {
-  return Journal.find({ status: "PUBLISHED" })
-    .populate("authorId", "name")
-    .sort({ publishedAt: -1 });
+export async function getPublishedJournals({ page = 1, limit = 12, search = "", domain = "" } = {}) {
+  const filter = { status: "PUBLISHED" };
+  if (domain) filter.domain = domain;
+  if (search) {
+    const escapedSearch = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    filter.$or = [
+      { title: { $regex: escapedSearch, $options: "i" } },
+      { abstract: { $regex: escapedSearch, $options: "i" } },
+      { domain: { $regex: escapedSearch, $options: "i" } },
+    ];
+  }
+
+  const skip = (page - 1) * limit;
+  const [journals, total] = await Promise.all([
+    Journal.find(filter)
+    .populate("authorId", "name displayName")
+      .sort({ publishedAt: -1, _id: -1 })
+      .skip(skip)
+      .limit(limit),
+    Journal.countDocuments(filter),
+  ]);
+  return {
+    journals,
+    pagination: {
+      page,
+      limit,
+      total,
+      pages: Math.ceil(total / limit),
+    },
+  };
 }

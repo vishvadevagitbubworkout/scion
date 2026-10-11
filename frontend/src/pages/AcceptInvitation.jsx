@@ -1,361 +1,346 @@
-import { useState, useEffect } from "react";
-import { useSearchParams, useNavigate, Link } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Link, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth";
 import invitationService from "../services/invitationService";
 
+const inputStyle = {
+  display: "block",
+  boxSizing: "border-box",
+  width: "100%",
+  marginTop: "0.4rem",
+  padding: "0.7rem 0.8rem",
+  border: "1px solid #cbd5e1",
+  borderRadius: "6px",
+  font: "inherit",
+};
+
+const labelStyle = {
+  display: "block",
+  marginBottom: "1rem",
+  color: "#334155",
+  fontSize: "0.9rem",
+  fontWeight: 600,
+};
+
+function getValidationFailureStage(requestError) {
+  const code = requestError.data?.code;
+  if (code === "INVITATION_EXPIRED") return "expired";
+  if (code === "INVITATION_REVOKED") return "revoked";
+  if (code === "INVITATION_ALREADY_USED") return "used";
+  if (requestError.status >= 500 || !requestError.status) return "network-error";
+  return "invalid";
+}
+
 export default function AcceptInvitation() {
   const [searchParams] = useSearchParams();
-  const token = searchParams.get("token");
+  const location = useLocation();
+  const [token] = useState(() => searchParams.get("token")
+    || new URLSearchParams(location.hash.slice(1)).get("token")
+    || "");
   const navigate = useNavigate();
   const { setAuthenticatedUser } = useAuth();
-
-  // Stages: 'validating' | 'invalid' | 'setup'
   const [stage, setStage] = useState("validating");
   const [email, setEmail] = useState("");
+  const [form, setForm] = useState({
+    fullName: "",
+    displayName: "",
+    username: "",
+    password: "",
+    confirmPassword: "",
+    bio: "",
+  });
   const [error, setError] = useState("");
-
-  // Setup form state
-  const [setupToken, setSetupToken] = useState("");
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
+  const [fieldErrors, setFieldErrors] = useState([]);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    let isMounted = true;
+    if (token && (location.search || location.hash)) {
+      navigate("/accept-invitation", { replace: true });
+    }
+  }, [location.hash, location.search, navigate, token]);
 
-    async function checkToken() {
-      if (!token) {
-        if (isMounted) {
-          setStage("invalid");
-          setError("No invitation token was found in the URL. Please verify your link.");
-        }
-        return;
-      }
-
-      try {
-        const data = await invitationService.validateInvitation(token);
-        if (isMounted) {
-          setEmail(data.email);
-          setSetupToken(data.setupToken);
-          setStage("setup");
-          setError("");
-        }
-      } catch (err) {
-        if (isMounted) {
-          setStage("invalid");
-          setError(
-            err.message ||
-              "This invitation is invalid, expired, or has already been used."
-          );
-        }
-      }
+  async function validateToken() {
+    if (!token) {
+      setStage("invalid");
+      setError("No invitation token was found. Use the link from your invitation email.");
+      return;
     }
 
-    checkToken();
+    setStage("validating");
+    setError("");
+    try {
+      const data = await invitationService.validateInvitation(token);
+      setEmail(data.email);
+      setStage("setup");
+    } catch (requestError) {
+      setStage(getValidationFailureStage(requestError));
+      setError(requestError.message || "Unable to validate this invitation.");
+    }
+  }
+
+  useEffect(() => {
+    let isMounted = true;
+    if (!token) {
+      Promise.resolve().then(() => {
+        if (isMounted) {
+          setStage("invalid");
+          setError("No invitation token was found. Use the link from your invitation email.");
+        }
+      });
+    } else {
+      invitationService.validateInvitation(token)
+        .then((data) => {
+          if (isMounted) {
+            setEmail(data.email);
+            setStage("setup");
+          }
+        })
+        .catch((requestError) => {
+          if (isMounted) {
+            setStage(getValidationFailureStage(requestError));
+            setError(requestError.message || "Unable to validate this invitation.");
+          }
+        });
+    }
 
     return () => {
       isMounted = false;
     };
   }, [token]);
 
-  const handleCompleteSetup = async (e) => {
-    e.preventDefault();
+  function updateField(event) {
+    const { name, value } = event.target;
+    setForm((current) => ({ ...current, [name]: value }));
+    setFieldErrors([]);
     setError("");
+  }
 
-    const trimmedUsername = username.trim().toLowerCase();
-    if (!trimmedUsername || trimmedUsername.length < 3) {
-      setError("Username must be at least 3 characters long.");
-      return;
-    }
-
-    if (!/^[a-zA-Z0-9_.-]+$/.test(trimmedUsername)) {
-      setError("Username can only contain letters, numbers, underscores, dots, and hyphens.");
-      return;
-    }
-
-    if (!password || password.length < 8) {
-      setError("Password must be at least 8 characters long.");
-      return;
-    }
-
-    if (password !== confirmPassword) {
-      setError("Passwords do not match.");
-      return;
-    }
-
+  async function handleSubmit(event) {
+    event.preventDefault();
+    setError("");
+    setFieldErrors([]);
     setLoading(true);
 
     try {
-      const data = await invitationService.completeSetup({
-        setupToken,
-        username: trimmedUsername,
-        password,
-        confirmPassword,
+      const data = await invitationService.completeSetup(form);
+      setAuthenticatedUser(data.user);
+      setStage("success");
+      navigate("/author", {
+        replace: true,
+        state: { message: "Welcome to Scion! Your Author account is ready." },
       });
-
-      if (data.user) {
-        setAuthenticatedUser(data.user);
-        navigate("/author", {
-          state: { message: "Welcome to Scion! Your Author account is ready." },
-        });
-      }
-    } catch (err) {
-      setError(
-        err.message ||
-          "Failed to complete account setup. Your setup token or invitation may have expired."
-      );
+    } catch (requestError) {
+      const code = requestError.data?.code;
+      if (requestError.data?.errors) setFieldErrors(requestError.data.errors);
+      if (code === "INVITATION_EXPIRED") setStage("expired");
+      else if (code === "INVITATION_REVOKED") setStage("revoked");
+      else if (code === "INVITATION_ALREADY_USED") setStage("used");
+      else if (!requestError.status) setStage("network-error");
+      setError(requestError.message || "Unable to complete account setup.");
     } finally {
       setLoading(false);
     }
-  };
+  }
+
+  const terminalStage = ["invalid", "expired", "revoked", "used"].includes(stage);
 
   return (
-    <div
-      style={{
-        maxWidth: "520px",
-        margin: "3rem auto",
-        padding: "2rem",
-        backgroundColor: "#ffffff",
-        borderRadius: "12px",
-        boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1)",
-        border: "1px solid #e2e8f0",
-      }}
-    >
-      <div style={{ textAlign: "center", marginBottom: "1.5rem" }}>
-        <h1 style={{ fontSize: "1.5rem", fontWeight: "700", color: "#0f172a", marginBottom: "0.25rem" }}>
-          Author Invitation Setup
-        </h1>
-        <p style={{ color: "#64748b", fontSize: "0.9rem", margin: 0 }}>
-          {stage === "validating" && "Verifying your invitation link..."}
-          {stage === "setup" && "Create your Author account"}
-          {stage === "invalid" && "Invitation Issue"}
+    <section style={{
+      maxWidth: "560px",
+      margin: "3rem auto",
+      padding: "2rem",
+      background: "#fff",
+      border: "1px solid #e2e8f0",
+      borderRadius: "12px",
+      boxShadow: "0 4px 12px rgb(15 23 42 / 8%)",
+    }}>
+      <header style={{ marginBottom: "1.5rem" }}>
+        <h1 style={{ margin: "0 0 0.5rem", color: "#0f172a" }}>Accept your Author invitation</h1>
+        <p style={{ margin: 0, color: "#64748b" }}>
+          {stage === "validating" && "Checking the invitation with Scion..."}
+          {stage === "setup" && "Complete your author profile to continue."}
+          {stage === "success" && "Your account is ready."}
+          {terminalStage && "This invitation cannot be used."}
+          {stage === "network-error" && "Scion could not be reached."}
         </p>
-      </div>
+      </header>
 
       {error && (
-        <div
-          style={{
-            padding: "0.85rem 1rem",
-            backgroundColor: "#fef2f2",
-            border: "1px solid #fecaca",
-            color: "#b91c1c",
-            borderRadius: "8px",
-            fontSize: "0.875rem",
-            marginBottom: "1.25rem",
-          }}
-        >
+        <div role="alert" style={{
+          marginBottom: "1rem",
+          padding: "0.85rem 1rem",
+          color: "#991b1b",
+          background: "#fef2f2",
+          border: "1px solid #fecaca",
+          borderRadius: "8px",
+        }}>
           {error}
         </div>
       )}
 
-      {/* Stage: Validating */}
-      {stage === "validating" && (
-        <div style={{ textAlign: "center", padding: "2rem 0", color: "#64748b" }}>
-          <p>Validating invitation security credentials...</p>
-        </div>
+      {fieldErrors.length > 0 && (
+        <ul role="alert" style={{ color: "#991b1b" }}>
+          {fieldErrors.map((message) => <li key={message}>{message}</li>)}
+        </ul>
       )}
 
-      {/* Stage: Invalid / Expired / Revoked */}
-      {stage === "invalid" && (
-        <div style={{ textAlign: "center", padding: "1rem 0" }}>
-          <p style={{ color: "#475569", marginBottom: "1.5rem", fontSize: "0.95rem" }}>
-            This invitation link is invalid, has expired after 2 hours, or was already used. Please request a new invitation from an author or administrator.
+      {stage === "validating" && <p role="status">Validating invitation...</p>}
+
+      {stage === "network-error" && (
+        <button type="button" onClick={stage === "setup" ? handleSubmit : validateToken}>
+          Try again
+        </button>
+      )}
+
+      {terminalStage && (
+        <div>
+          <p style={{ color: "#475569" }}>
+            {stage === "expired" && "The invitation expired. Ask an authorized ROOT or AUTHOR to issue a new invitation."}
+            {stage === "revoked" && "The inviter revoked this invitation. Ask an authorized ROOT or AUTHOR to issue a new one."}
+            {stage === "used" && "This invitation has already created an account and cannot be reused."}
+            {stage === "invalid" && "The link is invalid or incomplete. Ask an authorized ROOT or AUTHOR to send a new invitation."}
           </p>
-          <Link
-            to="/"
-            style={{
-              display: "inline-block",
-              padding: "0.5rem 1.25rem",
-              backgroundColor: "#2563eb",
-              color: "#ffffff",
-              textDecoration: "none",
-              borderRadius: "6px",
-              fontWeight: "600",
-              fontSize: "0.875rem",
-            }}
-          >
-            Return to Home
-          </Link>
+          <Link to="/">Return to Scion</Link>
         </div>
       )}
 
-      {/* Stage: Setup Form */}
       {stage === "setup" && (
-        <form onSubmit={handleCompleteSetup}>
-          <div
-            style={{
-              padding: "0.75rem 1rem",
-              backgroundColor: "#f0fdf4",
-              border: "1px solid #bbf7d0",
-              borderRadius: "6px",
-              marginBottom: "1.25rem",
-              fontSize: "0.85rem",
-              color: "#166534",
-            }}
-          >
-            Invitation verified! Complete your AUTHOR account registration below.
-          </div>
+        <form onSubmit={handleSubmit}>
+          <p role="status" style={{
+            padding: "0.8rem",
+            color: "#166534",
+            background: "#f0fdf4",
+            border: "1px solid #bbf7d0",
+            borderRadius: "6px",
+          }}>
+            Invitation verified. Your account email is bound to this invitation.
+          </p>
 
-          {/* Invited Email (Pre-filled and read-only) */}
-          <div style={{ marginBottom: "1.25rem" }}>
-            <label
-              htmlFor="invited-email"
-              style={{
-                display: "block",
-                fontSize: "0.85rem",
-                fontWeight: "600",
-                color: "#334155",
-                marginBottom: "0.35rem",
-              }}
-            >
-              Invited Email (Read-only)
-            </label>
+          <label htmlFor="invited-email" style={labelStyle}>
+            Invited email
             <input
               id="invited-email"
               type="email"
               value={email}
-              disabled
               readOnly
-              style={{
-                width: "100%",
-                padding: "0.6rem 0.85rem",
-                borderRadius: "6px",
-                border: "1px solid #cbd5e1",
-                backgroundColor: "#f1f5f9",
-                color: "#475569",
-                fontSize: "0.9rem",
-                boxSizing: "border-box",
-                cursor: "not-allowed",
-              }}
+              aria-readonly="true"
+              style={{ ...inputStyle, background: "#f1f5f9" }}
             />
-          </div>
+          </label>
 
-          {/* Username */}
-          <div style={{ marginBottom: "1.25rem" }}>
-            <label
-              htmlFor="author-username"
-              style={{
-                display: "block",
-                fontSize: "0.85rem",
-                fontWeight: "600",
-                color: "#334155",
-                marginBottom: "0.35rem",
-              }}
-            >
-              Username
-            </label>
+          <label htmlFor="full-name" style={labelStyle}>
+            Full name
+            <input
+              id="full-name"
+              name="fullName"
+              value={form.fullName}
+              onChange={updateField}
+              autoComplete="name"
+              minLength={2}
+              maxLength={100}
+              required
+              style={inputStyle}
+            />
+          </label>
+
+          <label htmlFor="display-name" style={labelStyle}>
+            Display name
+            <input
+              id="display-name"
+              name="displayName"
+              value={form.displayName}
+              onChange={updateField}
+              maxLength={60}
+              required
+              style={inputStyle}
+            />
+          </label>
+
+          <label htmlFor="author-username" style={labelStyle}>
+            Username
             <input
               id="author-username"
-              type="text"
-              placeholder="e.g. janesmith"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              required
+              name="username"
+              value={form.username}
+              onChange={updateField}
+              autoComplete="username"
               minLength={3}
               maxLength={30}
-              autoComplete="username"
-              style={{
-                width: "100%",
-                padding: "0.6rem 0.85rem",
-                borderRadius: "6px",
-                border: "1px solid #cbd5e1",
-                fontSize: "0.9rem",
-                boxSizing: "border-box",
-              }}
+              pattern="[A-Za-z0-9_.-]+"
+              required
+              style={inputStyle}
             />
-            <p style={{ margin: "0.25rem 0 0", fontSize: "0.75rem", color: "#64748b" }}>
-              3–30 characters. Letters, numbers, underscores, dots, hyphens.
-            </p>
-          </div>
+            <small style={{ color: "#64748b", fontWeight: 400 }}>
+              3–30 letters, numbers, underscores, dots, or hyphens.
+            </small>
+          </label>
 
-          {/* Password */}
-          <div style={{ marginBottom: "1.25rem" }}>
-            <label
-              htmlFor="author-password"
-              style={{
-                display: "block",
-                fontSize: "0.85rem",
-                fontWeight: "600",
-                color: "#334155",
-                marginBottom: "0.35rem",
-              }}
-            >
-              Password
-            </label>
+          <label htmlFor="author-bio" style={labelStyle}>
+            Short bio (optional)
+            <textarea
+              id="author-bio"
+              name="bio"
+              value={form.bio}
+              onChange={updateField}
+              maxLength={280}
+              rows={3}
+              style={inputStyle}
+            />
+          </label>
+
+          <label htmlFor="author-password" style={labelStyle}>
+            Password
             <input
               id="author-password"
+              name="password"
               type="password"
-              placeholder="At least 8 characters"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-              minLength={8}
+              value={form.password}
+              onChange={updateField}
               autoComplete="new-password"
-              style={{
-                width: "100%",
-                padding: "0.6rem 0.85rem",
-                borderRadius: "6px",
-                border: "1px solid #cbd5e1",
-                fontSize: "0.9rem",
-                boxSizing: "border-box",
-              }}
+              minLength={12}
+              maxLength={128}
+              required
+              style={inputStyle}
             />
-          </div>
+            <small style={{ color: "#64748b", fontWeight: 400 }}>
+              Use at least 12 characters.
+            </small>
+          </label>
 
-          {/* Confirm Password */}
-          <div style={{ marginBottom: "1.5rem" }}>
-            <label
-              htmlFor="confirm-password"
-              style={{
-                display: "block",
-                fontSize: "0.85rem",
-                fontWeight: "600",
-                color: "#334155",
-                marginBottom: "0.35rem",
-              }}
-            >
-              Confirm Password
-            </label>
+          <label htmlFor="confirm-password" style={labelStyle}>
+            Confirm password
             <input
               id="confirm-password"
+              name="confirmPassword"
               type="password"
-              placeholder="Re-enter your password"
-              value={confirmPassword}
-              onChange={(e) => setConfirmPassword(e.target.value)}
-              required
-              minLength={8}
+              value={form.confirmPassword}
+              onChange={updateField}
               autoComplete="new-password"
-              style={{
-                width: "100%",
-                padding: "0.6rem 0.85rem",
-                borderRadius: "6px",
-                border: "1px solid #cbd5e1",
-                fontSize: "0.9rem",
-                boxSizing: "border-box",
-              }}
+              minLength={12}
+              maxLength={128}
+              required
+              style={inputStyle}
             />
-          </div>
+          </label>
 
           <button
             type="submit"
             disabled={loading}
             style={{
               width: "100%",
-              padding: "0.75rem",
-              backgroundColor: loading ? "#94a3b8" : "#16a34a",
-              color: "#ffffff",
-              border: "none",
+              padding: "0.8rem",
+              color: "#fff",
+              background: loading ? "#94a3b8" : "#15803d",
+              border: 0,
               borderRadius: "6px",
-              fontWeight: "600",
-              cursor: loading ? "not-allowed" : "pointer",
-              fontSize: "0.95rem",
+              fontWeight: 700,
+              cursor: loading ? "wait" : "pointer",
             }}
           >
-            {loading ? "Creating Author Account..." : "Create Account & Enter Dashboard"}
+            {loading ? "Creating account..." : "Create Author account"}
           </button>
         </form>
       )}
-    </div>
+    </section>
   );
 }

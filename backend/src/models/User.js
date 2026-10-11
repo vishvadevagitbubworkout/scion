@@ -9,6 +9,18 @@ const userSchema = new mongoose.Schema(
       minlength: [2, "Name must be at least 2 characters"],
       maxlength: [100, "Name cannot exceed 100 characters"],
     },
+    displayName: {
+      type: String,
+      trim: true,
+      minlength: [2, "Display name must be at least 2 characters"],
+      maxlength: [60, "Display name cannot exceed 60 characters"],
+    },
+    bio: {
+      type: String,
+      trim: true,
+      maxlength: [280, "Bio cannot exceed 280 characters"],
+      default: "",
+    },
     email: {
       type: String,
       required: [true, "Email is required"],
@@ -51,6 +63,19 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    tokenVersion: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    acceptedInvitationId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Invitation",
+      unique: true,
+      sparse: true,
+      immutable: true,
+      select: false,
+    },
   },
   {
     timestamps: true,
@@ -64,6 +89,7 @@ userSchema.set("toJSON", {
     delete ret._id;
     delete ret.__v;
     delete ret.passwordHash;
+    delete ret.acceptedInvitationId;
     return ret;
   },
 });

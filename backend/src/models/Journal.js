@@ -61,16 +61,16 @@ journalSchema.set("toJSON", {
     delete ret._id;
     delete ret.__v;
 
-    // Handle authorId — can be raw ObjectId or populated User document
-    if (ret.authorId && typeof ret.authorId === "object" && ret.authorId._id) {
-      // Populated User document — expose safe author info
+    const populatedAuthor = doc.populated("authorId") ? doc.authorId : null;
+    if (populatedAuthor) {
+      const authorId = populatedAuthor._id.toString();
       ret.author = {
-        id: ret.authorId._id.toString(),
-        name: ret.authorId.name,
+        id: authorId,
+        name: populatedAuthor.displayName || populatedAuthor.name,
       };
-      ret.authorId = ret.authorId._id.toString();
-    } else if (ret.authorId) {
-      ret.authorId = ret.authorId.toString();
+      ret.authorId = authorId;
+    } else if (doc.authorId) {
+      ret.authorId = doc.authorId.toString();
     }
 
     return ret;

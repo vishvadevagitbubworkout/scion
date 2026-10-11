@@ -1,5 +1,6 @@
 const API_BASE_URL =
-  import.meta.env.VITE_API_URL || "http://localhost:5000/api";
+  import.meta.env.VITE_API_URL
+  || (import.meta.env.DEV ? "http://localhost:5000/api" : "/api");
 
 /**
  * Common request helper.
@@ -35,8 +36,14 @@ export const journalService = {
   /**
    * Public: returns all PUBLISHED journals.
    */
-  async getPublishedJournals() {
-    return request("/journals");
+  async getPublishedJournals({ page = 1, limit = 9, search = "", domain = "" } = {}) {
+    const params = new URLSearchParams({
+      page: String(page),
+      limit: String(limit),
+    });
+    if (search) params.set("search", search);
+    if (domain) params.set("domain", domain);
+    return request(`/journals?${params.toString()}`);
   },
 
   /**

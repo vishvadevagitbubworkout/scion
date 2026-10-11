@@ -1,16 +1,27 @@
 import {
   registerUser,
   loginUser,
-  getUserById,
+  requestPasswordReset,
+  completePasswordReset,
 } from "../services/authService.js";
 import {
   validateRegistrationInput,
   validateLoginInput,
+  validatePasswordResetRequestInput,
+  validatePasswordResetInput,
 } from "../validators/authValidators.js";
 import {
   ACCESS_TOKEN_COOKIE_NAME,
   getAuthCookieOptions,
+  getAccessTokenFromRequest,
+  verifyAccessToken,
 } from "../utils/jwt.js";
+import mongoose from "mongoose";
+import User from "../models/User.js";
+
+const PASSWORD_RESET_RESPONSE = {
+  message: "If an active account matches that address, reset instructions will be sent if email delivery is available.",
+};
 
 /**
  * Handles user registration.
@@ -102,11 +113,70 @@ export async function login(req, res) {
   }
 }
 
+export async function requestPasswordResetHandler(req, res) {
+  const { errors, sanitized } = validatePasswordResetRequestInput(req.body);
+  if (errors.length > 0) {
+    return res.status(400).json({ message: errors[0], errors });
+  }
+
+  try {
+    await requestPasswordReset({ email: sanitized.email });
+  } catch {
+    console.error("Password recovery request could not be completed");
+  }
+
+  return res.status(202).json(PASSWORD_RESET_RESPONSE);
+}
+
+export async function completePasswordResetHandler(req, res) {
+  const { errors, sanitized } = validatePasswordResetInput(req.body);
+  if (errors.length > 0) {
+    return res.status(400).json({ message: errors[0], errors });
+  }
+
+  try {
+    await completePasswordReset({
+      token: sanitized.token,
+      password: sanitized.password,
+    });
+    return res.status(200).json({ message: "Password reset successfully. Please sign in." });
+  } catch (error) {
+    if (error.statusCode === 400) {
+      return res.status(400).json({ message: "Password reset link is invalid or expired." });
+    }
+    console.error("Password reset could not be completed");
+    return res.status(500).json({ message: "Unable to reset password right now." });
+  }
+}
+
 /**
  * Handles user logout by clearing the HttpOnly cookie.
  */
 export async function logout(req, res) {
   try {
+    const token = getAccessTokenFromRequest(req);
+    if (token) {
+      let decoded;
+      try {
+        decoded = verifyAccessToken(token);
+      } catch {
+        decoded = null;
+      }
+      if (decoded && mongoose.Types.ObjectId.isValid(decoded.sub)) {
+        const tokenVersion = decoded.tokenVersion ?? 0;
+        await User.updateOne(
+          {
+            _id: decoded.sub,
+            $or: [
+              { tokenVersion },
+              ...(tokenVersion === 0 ? [{ tokenVersion: { $exists: false } }] : []),
+            ],
+          },
+          { $inc: { tokenVersion: 1 } }
+        );
+      }
+    }
+
     const cookieOptions = getAuthCookieOptions(0);
     res.clearCookie(ACCESS_TOKEN_COOKIE_NAME, {
       ...cookieOptions,
@@ -139,6 +209,7 @@ export async function getCurrentUser(req, res) {
       user: {
         id: req.user.id,
         name: req.user.name,
+        displayName: req.user.displayName,
         email: req.user.email,
         role: req.user.role,
       },

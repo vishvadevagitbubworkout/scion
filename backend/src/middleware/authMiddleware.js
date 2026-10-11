@@ -1,5 +1,9 @@
-import { verifyAccessToken, ACCESS_TOKEN_COOKIE_NAME } from "../utils/jwt.js";
+import { verifyAccessToken, getAccessTokenFromRequest } from "../utils/jwt.js";
 import User from "../models/User.js";
+
+function tokenMatchesUser(decoded, user) {
+  return (decoded.tokenVersion ?? 0) === user.tokenVersion;
+}
 
 /**
  * Authentication middleware.
@@ -7,17 +11,7 @@ import User from "../models/User.js";
  */
 export async function authenticate(req, res, next) {
   try {
-    let token = null;
-
-    // Check HttpOnly cookie first
-    if (req.cookies && req.cookies[ACCESS_TOKEN_COOKIE_NAME]) {
-      token = req.cookies[ACCESS_TOKEN_COOKIE_NAME];
-    } else if (
-      req.headers.authorization &&
-      req.headers.authorization.startsWith("Bearer ")
-    ) {
-      token = req.headers.authorization.split(" ")[1];
-    }
+    const token = getAccessTokenFromRequest(req);
 
     if (!token) {
       return res.status(401).json({
@@ -58,11 +52,15 @@ export async function authenticate(req, res, next) {
         message: "Account has been deactivated",
       });
     }
+    if (!tokenMatchesUser(decoded, user)) {
+      return res.status(401).json({ message: "Authentication session has been revoked" });
+    }
 
     // Attach trusted identity to req.user
     req.user = {
       id: user._id.toString(),
       name: user.name,
+      displayName: user.displayName,
       email: user.email,
       role: user.role,
       isActive: user.isActive,
@@ -86,16 +84,7 @@ export async function authenticate(req, res, next) {
  */
 export async function optionalAuthenticate(req, res, next) {
   try {
-    let token = null;
-
-    if (req.cookies && req.cookies[ACCESS_TOKEN_COOKIE_NAME]) {
-      token = req.cookies[ACCESS_TOKEN_COOKIE_NAME];
-    } else if (
-      req.headers.authorization &&
-      req.headers.authorization.startsWith("Bearer ")
-    ) {
-      token = req.headers.authorization.split(" ")[1];
-    }
+    const token = getAccessTokenFromRequest(req);
 
     if (!token) return next();
 
@@ -110,7 +99,7 @@ export async function optionalAuthenticate(req, res, next) {
     if (!decoded || !decoded.sub) return next();
 
     const user = await User.findById(decoded.sub);
-    if (user && user.isActive) {
+    if (user && user.isActive && tokenMatchesUser(decoded, user)) {
       req.user = {
         id: user._id.toString(),
         name: user.name,

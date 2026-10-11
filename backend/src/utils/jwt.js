@@ -1,6 +1,7 @@
 import jwt from "jsonwebtoken";
 
 const ACCESS_TOKEN_COOKIE_NAME = "scion_access_token";
+const INVITATION_SETUP_COOKIE_NAME = "scion_invitation_setup";
 
 /**
  * Returns JWT secret from environment, throwing if missing.
@@ -26,11 +27,23 @@ export function generateAccessToken(user) {
   const payload = {
     sub: user._id ? user._id.toString() : user.id,
     role: user.role,
+    tokenVersion: user.tokenVersion ?? 0,
   };
 
   return jwt.sign(payload, secret, {
     expiresIn,
   });
+}
+
+export function getAccessTokenFromRequest(req) {
+  if (req.cookies?.[ACCESS_TOKEN_COOKIE_NAME]) {
+    return req.cookies[ACCESS_TOKEN_COOKIE_NAME];
+  }
+  const authorization = req.headers.authorization;
+  if (authorization?.startsWith("Bearer ")) {
+    return authorization.slice("Bearer ".length);
+  }
+  return null;
 }
 
 /**
@@ -60,4 +73,15 @@ export function getAuthCookieOptions(maxAgeMs = 7 * 24 * 60 * 60 * 1000) {
   };
 }
 
-export { ACCESS_TOKEN_COOKIE_NAME };
+export function getInvitationSetupCookieOptions(maxAgeMs) {
+  const isProduction = process.env.NODE_ENV === "production";
+  return {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: "strict",
+    path: "/api/invitations/complete",
+    maxAge: maxAgeMs,
+  };
+}
+
+export { ACCESS_TOKEN_COOKIE_NAME, INVITATION_SETUP_COOKIE_NAME };

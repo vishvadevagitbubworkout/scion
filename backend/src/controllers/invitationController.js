@@ -15,7 +15,9 @@ import {
 } from "../validators/invitationValidators.js";
 import {
   ACCESS_TOKEN_COOKIE_NAME,
+  INVITATION_SETUP_COOKIE_NAME,
   getAuthCookieOptions,
+  getInvitationSetupCookieOptions,
 } from "../utils/jwt.js";
 
 /**
@@ -37,6 +39,14 @@ export async function sendOtpHandler(req, res) {
 
     return res.status(200).json(result);
   } catch (error) {
+    if (error.statusCode === 429) {
+      const retryAfter = Math.max(1, error.retryAfterSeconds || 60);
+      res.set("Retry-After", String(retryAfter));
+      return res.status(429).json({
+        message: "Please wait before requesting another verification email.",
+        retryAfterSeconds: retryAfter,
+      });
+    }
     if (error.statusCode === 409) {
       if (error.message === "ACTIVE_INVITATION_EXISTS") {
         return res.status(409).json({
@@ -48,7 +58,7 @@ export async function sendOtpHandler(req, res) {
       });
     }
 
-    console.error("Send OTP error:", error.message);
+    console.error("Verification email could not be accepted by the provider");
     return res.status(500).json({ message: "Internal server error" });
   }
 }
@@ -68,6 +78,7 @@ export async function verifyOtpHandler(req, res) {
     const result = await verifyEmailOtp({
       email: sanitized.email,
       otp: sanitized.otp,
+      invitedById: req.user.id,
     });
 
     return res.status(200).json(result);
@@ -116,7 +127,7 @@ export async function createInvitationHandler(req, res) {
     });
 
     return res.status(201).json({
-      message: "Author invitation sent successfully",
+      message: "Invitation email accepted by the email provider",
       invitation: result.invitation,
     });
   } catch (error) {
@@ -141,7 +152,7 @@ export async function createInvitationHandler(req, res) {
       });
     }
 
-    console.error("Create invitation error:", error.message);
+    console.error("Invitation email could not be accepted by the provider");
     return res.status(500).json({ message: "Internal server error" });
   }
 }
@@ -212,33 +223,66 @@ export async function revokeInvitationHandler(req, res) {
  */
 export async function validateInvitationHandler(req, res) {
   try {
-    const { token } = req.query;
+    const { token } = req.body;
     if (!token) {
+      res.clearCookie(INVITATION_SETUP_COOKIE_NAME, getInvitationSetupCookieOptions(0));
       return res.status(400).json({ message: "Invitation token is required" });
     }
 
     const result = await validateInvitationToken(token);
-    return res.status(200).json(result);
+    const setupCookieOptions = getInvitationSetupCookieOptions(
+      Math.max(0, result.setupTokenExpiresAt.getTime() - Date.now())
+    );
+    res.cookie(INVITATION_SETUP_COOKIE_NAME, result.setupToken, setupCookieOptions);
+    return res.status(200).json({
+      valid: result.valid,
+      email: result.email,
+      expiresAt: result.expiresAt,
+    });
   } catch (error) {
+    res.clearCookie(INVITATION_SETUP_COOKIE_NAME, getInvitationSetupCookieOptions(0));
     if (error.statusCode === 404) {
-      return res.status(404).json({ message: "Invitation not found" });
+      return res.status(404).json({ code: "INVITATION_INVALID", message: "Invitation not found" });
     }
     if (error.statusCode === 410) {
-      return res.status(410).json({
-        message: "Invitation Expired. Please request a new invitation.",
+      const message = error.message === "INVITATION_REVOKED"
+        ? "This invitation was revoked. Ask an authorized author for a new invitation."
+        : error.message === "INVITER_UNAVAILABLE"
+          ? "This invitation is no longer available. Ask an authorized author for a new invitation."
+          : "This invitation has expired. Ask an authorized author for a new invitation.";
+      const code = error.message === "INVITATION_REVOKED"
+        ? "INVITATION_REVOKED"
+        : error.message === "INVITER_UNAVAILABLE"
+          ? "INVITER_UNAVAILABLE"
+          : "INVITATION_EXPIRED";
+      return res.status(410).json({ code, message });
+    }
+    if (error.statusCode === 409) {
+      const used = error.message === "INVITATION_ALREADY_USED";
+      return res.status(409).json({
+        code: used ? "INVITATION_ALREADY_USED" : "INVITATION_PROCESSING",
+        message: used
+          ? "This invitation has already been accepted."
+          : "This invitation is being accepted. Please try again shortly.",
       });
     }
     if (error.statusCode === 400) {
       if (error.message === "INVITATION_REVOKED") {
-        return res.status(400).json({ message: "This invitation has been revoked" });
+        return res.status(410).json({
+          code: "INVITATION_REVOKED",
+          message: "This invitation was revoked. Ask an authorized author for a new invitation.",
+        });
       }
       if (error.message === "INVITATION_ALREADY_USED") {
-        return res.status(400).json({ message: "This invitation has already been accepted" });
+        return res.status(409).json({
+          code: "INVITATION_ALREADY_USED",
+          message: "This invitation has already been accepted.",
+        });
       }
-      return res.status(400).json({ message: "Invalid or inactive invitation" });
+      return res.status(400).json({ code: "INVITATION_INVALID", message: "Invalid invitation." });
     }
 
-    console.error("Validate invitation error:", error.message);
+    console.error("Validate invitation error");
     return res.status(500).json({ message: "Internal server error" });
   }
 }
@@ -256,11 +300,18 @@ export async function completeSetupHandler(req, res) {
     }
 
     const { user, token } = await completeAuthorSetup({
-      setupToken: sanitized.setupToken,
+      setupToken: req.cookies?.[INVITATION_SETUP_COOKIE_NAME],
+      fullName: sanitized.fullName,
+      displayName: sanitized.displayName,
       username: sanitized.username,
       password: sanitized.password,
+      bio: sanitized.bio,
     });
 
+    res.clearCookie(
+      INVITATION_SETUP_COOKIE_NAME,
+      getInvitationSetupCookieOptions(0)
+    );
     const cookieOptions = getAuthCookieOptions();
     res.cookie(ACCESS_TOKEN_COOKIE_NAME, token, cookieOptions);
 
@@ -270,32 +321,48 @@ export async function completeSetupHandler(req, res) {
     });
   } catch (error) {
     if (error.statusCode === 409) {
-      if (error.message === "USERNAME_ALREADY_EXISTS") {
-        return res.status(409).json({
-          message: "Username is already taken. Please choose another username.",
-        });
-      }
-      if (error.message === "EMAIL_ALREADY_REGISTERED") {
-        return res.status(409).json({
-          message:
-            "This email address is already registered as an account. Please sign in or contact your administrator.",
-        });
-      }
       if (error.message === "INVITATION_ALREADY_USED") {
         return res.status(409).json({
+          code: "INVITATION_ALREADY_USED",
           message: "This invitation has already been accepted.",
         });
+      }
+      if (error.message === "INVITATION_PROCESSING") {
+        return res.status(409).json({ code: "INVITATION_PROCESSING", message: "This invitation is being accepted. Please try again shortly." });
+      }
+      if (error.message === "USERNAME_ALREADY_EXISTS") {
+        return res.status(409).json({ code: "USERNAME_ALREADY_EXISTS", message: "Username is already taken. Please choose another." });
+      }
+      if (error.message === "EMAIL_ALREADY_REGISTERED") {
+        return res.status(409).json({ code: "EMAIL_ALREADY_REGISTERED", message: "This invited email is already registered." });
       }
     }
     if (error.statusCode === 410) {
       if (error.message === "INVITATION_EXPIRED") {
         return res.status(410).json({
+          code: "INVITATION_EXPIRED",
           message: "Invitation Expired. Please request a new invitation.",
         });
       }
-      return res.status(410).json({
-        message: "Setup authorization token has expired. Please re-open your invitation link.",
-      });
+      if (error.message === "INVITATION_REVOKED") {
+        return res.status(410).json({
+          code: "INVITATION_REVOKED",
+          message: "This invitation was revoked. Ask an authorized author for a new invitation.",
+        });
+      }
+      if (error.message === "INVITATION_ALREADY_USED") {
+        return res.status(409).json({
+          code: "INVITATION_ALREADY_USED",
+          message: "This invitation has already been accepted.",
+        });
+      }
+      if (error.message === "INVITER_UNAVAILABLE") {
+        return res.status(410).json({
+          code: "INVITER_UNAVAILABLE",
+          message: "This invitation is no longer available. Ask an authorized author for a new invitation.",
+        });
+      }
+      return res.status(410).json({ code: "SETUP_TOKEN_EXPIRED", message: "Your setup session expired. Re-open the invitation link." });
     }
     if (error.statusCode === 400) {
       return res.status(400).json({
@@ -306,7 +373,7 @@ export async function completeSetupHandler(req, res) {
       });
     }
 
-    console.error("Complete author setup error:", error.message);
+    console.error("Complete author setup error");
     return res.status(500).json({ message: "Internal server error" });
   }
 }

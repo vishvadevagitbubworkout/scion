@@ -248,8 +248,22 @@ export async function publishJournalHandler(req, res) {
  */
 export async function getPublishedJournalsHandler(req, res) {
   try {
-    const journals = await getPublishedJournals();
-    return res.status(200).json({ journals });
+    const page = Number(req.query.page ?? 1);
+    const limit = Number(req.query.limit ?? 12);
+    const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
+    const domain = typeof req.query.domain === "string" ? req.query.domain.trim() : "";
+    if (
+      !Number.isInteger(page) || page < 1 ||
+      !Number.isInteger(limit) || limit < 1 || limit > 50 ||
+      search.length > 80 || domain.length > 100 ||
+      Array.isArray(req.query.page) || Array.isArray(req.query.limit) ||
+      Array.isArray(req.query.search) || Array.isArray(req.query.domain)
+    ) {
+      return res.status(400).json({ message: "Invalid journal listing parameters" });
+    }
+
+    const result = await getPublishedJournals({ page, limit, search, domain });
+    return res.status(200).json(result);
   } catch (error) {
     console.error("Get published journals error:", error.message);
     return res.status(500).json({ message: "Internal server error" });

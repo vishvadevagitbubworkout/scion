@@ -21,6 +21,18 @@ const emailVerificationSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    sendAttempts: {
+      type: Number,
+      default: 0,
+    },
+    sendWindowStartedAt: {
+      type: Date,
+      default: Date.now,
+    },
+    lastSentAt: {
+      type: Date,
+      default: null,
+    },
     otpExpiresAt: {
       type: Date,
       required: true,
@@ -49,7 +61,7 @@ const emailVerificationSchema = new mongoose.Schema(
   }
 );
 
-emailVerificationSchema.index({ email: 1 });
+emailVerificationSchema.index({ email: 1 }, { unique: true });
 emailVerificationSchema.index({ otpExpiresAt: 1 });
 
 const EmailVerification = mongoose.model(

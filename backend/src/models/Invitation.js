@@ -59,6 +59,11 @@ const invitationSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    processingLockId: {
+      type: String,
+      default: null,
+      select: false,
+    },
     invitedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -95,6 +100,7 @@ invitationSchema.set("toJSON", {
     delete ret.otpHash;
     delete ret.setupTokenHash;
     delete ret.processingLockedAt;
+    delete ret.processingLockId;
     if (ret.invitedBy && ret.invitedBy._id) {
       ret.invitedBy = {
         id: ret.invitedBy._id.toString(),

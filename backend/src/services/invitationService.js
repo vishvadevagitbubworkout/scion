@@ -13,6 +13,9 @@ const OTP_LIFETIME_MS = 10 * 60 * 1000; // 10 minutes
 const SETUP_TOKEN_LIFETIME_MS = 15 * 60 * 1000; // 15 minutes
 const VERIFICATION_TOKEN_LIFETIME_MS = 15 * 60 * 1000; // 15 minutes
 const MAX_OTP_ATTEMPTS = 5;
+const OTP_RESEND_COOLDOWN_MS = 60 * 1000;
+const OTP_SEND_WINDOW_MS = 60 * 60 * 1000;
+const MAX_OTP_SENDS_PER_WINDOW = 5;
 const PROCESSING_LOCK_TIMEOUT_MS = 30 * 1000; // 30 seconds
 
 /**
@@ -64,36 +67,88 @@ export async function sendVerificationOtp({ email, invitedById }) {
     throw error;
   }
 
-  // 3. Generate 6-digit numeric OTP (100000 - 999999) using crypto.randomInt
+  const now = new Date();
+  const verification = await EmailVerification.findOne({ email: normalizedEmail })
+    .select("sendAttempts sendWindowStartedAt lastSentAt updatedAt");
+  const attemptsInWindow = verification?.sendAttempts ?? 0;
+
+  if (verification?.lastSentAt) {
+    const cooldownRemaining = OTP_RESEND_COOLDOWN_MS
+      - (now.getTime() - verification.lastSentAt.getTime());
+    if (cooldownRemaining > 0) {
+      const error = new Error("OTP_RESEND_COOLDOWN");
+      error.statusCode = 429;
+      error.retryAfterSeconds = Math.ceil(cooldownRemaining / 1000);
+      throw error;
+    }
+  }
+
+  const sendWindowExpired = !verification?.sendWindowStartedAt
+    || now.getTime() - verification.sendWindowStartedAt.getTime() >= OTP_SEND_WINDOW_MS;
+  if (verification && !sendWindowExpired
+    && attemptsInWindow >= MAX_OTP_SENDS_PER_WINDOW) {
+    const error = new Error("OTP_SEND_LIMIT_EXCEEDED");
+    error.statusCode = 429;
+    error.retryAfterSeconds = Math.ceil(
+      (verification.sendWindowStartedAt.getTime() + OTP_SEND_WINDOW_MS - now.getTime()) / 1000
+    );
+    throw error;
+  }
+
+  // Generate a cryptographically random six-digit OTP.
   const otp = crypto.randomInt(100000, 1000000).toString();
   const otpHash = await hashPassword(otp);
+  const sendState = {
+    otpHash,
+    otpAttempts: 0,
+    otpExpiresAt: new Date(now.getTime() + OTP_LIFETIME_MS),
+    verified: false,
+    verificationTokenHash: null,
+    verificationTokenExpiresAt: null,
+    invitedBy: invitedById,
+    lastSentAt: now,
+    sendWindowStartedAt: sendWindowExpired ? now : verification?.sendWindowStartedAt,
+    sendAttempts: sendWindowExpired ? 1 : attemptsInWindow + 1,
+  };
 
-  const otpExpiresAt = new Date(Date.now() + OTP_LIFETIME_MS);
-
-  // 3. Upsert email verification record
-  await EmailVerification.findOneAndUpdate(
-    { email: normalizedEmail },
-    {
-      $set: {
-        otpHash,
-        otpAttempts: 0,
-        otpExpiresAt,
-        verified: false,
-        verificationTokenHash: null,
-        verificationTokenExpiresAt: null,
-        invitedBy: invitedById,
+  if (verification) {
+    const updated = await EmailVerification.findOneAndUpdate(
+      {
+        _id: verification._id,
+        updatedAt: verification.updatedAt,
       },
-    },
-    { upsert: true, returnDocument: "after" }
-  );
+      { $set: sendState },
+      { returnDocument: "after" }
+    );
+    if (!updated) {
+      const error = new Error("OTP_SEND_RACE");
+      error.statusCode = 429;
+      error.retryAfterSeconds = Math.ceil(OTP_RESEND_COOLDOWN_MS / 1000);
+      throw error;
+    }
+  } else {
+    try {
+      await EmailVerification.create({ email: normalizedEmail, ...sendState });
+    } catch (error) {
+      if (error.code === 11000) {
+        const rateLimitError = new Error("OTP_SEND_RACE");
+        rateLimitError.statusCode = 429;
+        rateLimitError.retryAfterSeconds = Math.ceil(OTP_RESEND_COOLDOWN_MS / 1000);
+        throw rateLimitError;
+      }
+      throw error;
+    }
+  }
 
-  // 4. Send email via emailService
-  await sendOtpEmail({ to: normalizedEmail, otp });
+  try {
+    await sendOtpEmail({ to: normalizedEmail, otp });
+  } catch {
+    throw new Error("Verification email could not be accepted by the provider");
+  }
 
-  // Raw OTP is NEVER returned in response
   return {
     success: true,
-    message: "OTP sent successfully to the provided email address",
+    message: "Verification email accepted by the email provider",
   };
 }
 
@@ -103,46 +158,42 @@ export async function sendVerificationOtp({ email, invitedById }) {
  * @param {{ email: string, otp: string }} params
  * @returns {Promise<{ message: string, verificationToken: string }>}
  */
-export async function verifyEmailOtp({ email, otp }) {
+export async function verifyEmailOtp({ email, otp, invitedById }) {
   const normalizedEmail = email.trim().toLowerCase();
 
-  const record = await EmailVerification.findOne({ email: normalizedEmail }).select(
-    "+otpHash"
-  );
+  const record = await EmailVerification.findOne({
+    email: normalizedEmail,
+    invitedBy: invitedById,
+    verified: false,
+    otpExpiresAt: { $gt: new Date() },
+    otpAttempts: { $lt: MAX_OTP_ATTEMPTS },
+  }).select("+otpHash");
 
   if (!record) {
-    const error = new Error("NO_OTP_REQUESTED");
-    error.statusCode = 404;
+    const expired = await EmailVerification.exists({
+      email: normalizedEmail,
+      invitedBy: invitedById,
+      otpExpiresAt: { $lte: new Date() },
+    });
+    const error = new Error(expired ? "OTP_EXPIRED" : "NO_OTP_REQUESTED");
+    error.statusCode = expired ? 410 : 404;
     throw error;
   }
 
-  // Check expiration
-  if (new Date() > record.otpExpiresAt) {
-    const error = new Error("OTP_EXPIRED");
-    error.statusCode = 410;
-    throw error;
-  }
-
-  // Check maximum failed attempts
-  if (record.otpAttempts >= MAX_OTP_ATTEMPTS) {
-    const error = new Error("MAX_OTP_ATTEMPTS_EXCEEDED");
-    error.statusCode = 429;
-    throw error;
-  }
-
-  // Verify OTP using Argon2id
   const isValid = await verifyPassword(otp.trim(), record.otpHash);
   if (!isValid) {
-    record.otpAttempts += 1;
-    await record.save();
-
-    if (record.otpAttempts >= MAX_OTP_ATTEMPTS) {
+    const failedAttempt = await EmailVerification.findOneAndUpdate(
+      { _id: record._id, otpAttempts: { $lt: MAX_OTP_ATTEMPTS }, verified: false },
+      { $inc: { otpAttempts: 1 } },
+      { returnDocument: "after" }
+    );
+    if (!failedAttempt || failedAttempt.otpAttempts >= MAX_OTP_ATTEMPTS) {
       const error = new Error("MAX_OTP_ATTEMPTS_EXCEEDED");
       error.statusCode = 429;
       throw error;
     }
 
-    const remainingAttempts = MAX_OTP_ATTEMPTS - record.otpAttempts;
+    const remainingAttempts = MAX_OTP_ATTEMPTS - failedAttempt.otpAttempts;
     const error = new Error("INVALID_OTP");
     error.statusCode = 400;
     error.remainingAttempts = remainingAttempts;
@@ -153,12 +204,30 @@ export async function verifyEmailOtp({ email, otp }) {
   const verificationToken = crypto.randomBytes(32).toString("hex");
   const verificationTokenHash = sha256(verificationToken);
 
-  record.verified = true;
-  record.verificationTokenHash = verificationTokenHash;
-  record.verificationTokenExpiresAt = new Date(
-    Date.now() + VERIFICATION_TOKEN_LIFETIME_MS
+  const claimed = await EmailVerification.findOneAndUpdate(
+    {
+      _id: record._id,
+      otpHash: record.otpHash,
+      invitedBy: invitedById,
+      verified: false,
+      otpAttempts: { $lt: MAX_OTP_ATTEMPTS },
+      otpExpiresAt: { $gt: new Date() },
+    },
+    {
+      $set: {
+        verified: true,
+        verificationTokenHash,
+        verificationTokenExpiresAt: new Date(Date.now() + VERIFICATION_TOKEN_LIFETIME_MS),
+      },
+      $unset: { otpHash: 1 },
+    },
+    { returnDocument: "after" }
   );
-  await record.save();
+  if (!claimed) {
+    const error = new Error("NO_OTP_REQUESTED");
+    error.statusCode = 404;
+    throw error;
+  }
 
   return {
     success: true,
@@ -180,6 +249,7 @@ export async function createInvitation({
   email,
   verificationToken,
   invitedById,
+  sendEmail = sendInvitationEmail,
 }) {
   const normalizedEmail = email.trim().toLowerCase();
 
@@ -196,6 +266,7 @@ export async function createInvitation({
   const verificationRecord = await EmailVerification.findOne({
     email: normalizedEmail,
     verificationTokenHash,
+    invitedBy: invitedById,
     verified: true,
     verificationTokenExpiresAt: { $gt: new Date() },
   });
@@ -220,7 +291,19 @@ export async function createInvitation({
   }
 
   // 4. Consume the verification record (one-time use)
-  await EmailVerification.deleteOne({ _id: verificationRecord._id });
+  const consumedRecord = await EmailVerification.findOneAndDelete({
+    _id: verificationRecord._id,
+    email: normalizedEmail,
+    invitedBy: invitedById,
+    verificationTokenHash,
+    verified: true,
+    verificationTokenExpiresAt: { $gt: new Date() },
+  });
+  if (!consumedRecord) {
+    const error = new Error("EMAIL_NOT_VERIFIED");
+    error.statusCode = 400;
+    throw error;
+  }
 
   // 5. Generate secure 64-char hex invitation token
   const invitationToken = crypto.randomBytes(32).toString("hex");
@@ -241,13 +324,28 @@ export async function createInvitation({
 
   // 8. Construct invitation URL and send email
   const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
-  const invitationUrl = `${frontendUrl}/accept-invitation?token=${invitationToken}`;
+  const invitationUrl = new URL("/accept-invitation", frontendUrl);
+  invitationUrl.hash = new URLSearchParams({ token: invitationToken }).toString();
 
-  await sendInvitationEmail({
-    to: normalizedEmail,
-    invitationUrl,
-    expiresAt,
-  });
+  try {
+    await sendEmail({
+      to: normalizedEmail,
+      invitationUrl: invitationUrl.href,
+      expiresAt,
+    });
+  } catch (deliveryError) {
+    try {
+      await Invitation.findOneAndUpdate(
+        { _id: invitation._id, status: "PENDING" },
+        { $set: { status: "REVOKED", revokedAt: new Date() } }
+      );
+    } catch (recoveryError) {
+      throw new Error("Invitation delivery failed and invalidation could not be confirmed", {
+        cause: recoveryError,
+      });
+    }
+    throw new Error("Invitation email delivery failed", { cause: deliveryError });
+  }
 
   // Raw token is NEVER returned in response
   return {
@@ -300,19 +398,26 @@ export async function revokeInvitation({ invitationId, userId, userRole }) {
     throw error;
   }
 
-  invitation.status = "REVOKED";
-  invitation.revokedAt = new Date();
-  await invitation.save();
+  const revoked = await Invitation.findOneAndUpdate(
+    { _id: invitationId, status: "PENDING" },
+    { $set: { status: "REVOKED", revokedAt: new Date() } },
+    { returnDocument: "after" }
+  );
+  if (!revoked) {
+    const error = new Error("CANNOT_REVOKE_NON_PENDING");
+    error.statusCode = 400;
+    throw error;
+  }
 
-  return invitation;
+  return revoked;
 }
 
 /**
  * Validates invitation token from the URL.
- * Generates and returns short-lived setupToken (<= 15 mins, <= expiresAt).
+ * Generates short-lived setup authorization (<= 15 mins, <= expiresAt).
  * Public endpoint.
  * @param {string} rawToken
- * @returns {Promise<{ valid: boolean, email: string, setupToken: string, expiresAt: Date }>}
+ * @returns {Promise<{ valid: boolean, email: string, setupToken: string, expiresAt: Date, setupTokenExpiresAt: Date }>}
  */
 export async function validateInvitationToken(rawToken) {
   if (!rawToken || typeof rawToken !== "string") {
@@ -330,276 +435,433 @@ export async function validateInvitationToken(rawToken) {
     throw error;
   }
 
+  const now = new Date();
   if (invitation.status === "REVOKED") {
     const error = new Error("INVITATION_REVOKED");
-    error.statusCode = 400;
+    error.statusCode = 410;
     throw error;
   }
 
   if (invitation.status === "ACCEPTED") {
     const error = new Error("INVITATION_ALREADY_USED");
-    error.statusCode = 400;
+    error.statusCode = 409;
     throw error;
   }
 
-  // Server-side check for 2-hour expiration
-  if (new Date() > invitation.expiresAt) {
-    if (invitation.status !== "EXPIRED") {
-      invitation.status = "EXPIRED";
-      await invitation.save();
-    }
+  if (invitation.expiresAt <= now || invitation.status === "EXPIRED") {
+    await Invitation.updateOne(
+      {
+        _id: invitation._id,
+        status: { $in: ["PENDING", "PROCESSING"] },
+        expiresAt: { $lte: now },
+      },
+      {
+        $set: { status: "EXPIRED" },
+        $unset: { processingLockedAt: 1, processingLockId: 1 },
+      }
+    );
     const error = new Error("INVITATION_EXPIRED");
     error.statusCode = 410;
     throw error;
   }
 
   if (invitation.status !== "PENDING") {
-    const error = new Error("INVITATION_NOT_ACTIVE");
-    error.statusCode = 400;
+    const error = new Error("INVITATION_PROCESSING");
+    error.statusCode = 409;
     throw error;
   }
 
-  // Issue short-lived setupToken (<= 15 mins, never exceeding 2-hour expiresAt)
+  const inviter = await User.findOne({
+    _id: invitation.invitedBy,
+    isActive: true,
+    role: { $in: ["ROOT", "AUTHOR"] },
+  }).select("_id");
+  if (!inviter) {
+    const error = new Error("INVITER_UNAVAILABLE");
+    error.statusCode = 410;
+    throw error;
+  }
+
+  // Validation issues a short-lived form token but never consumes the invitation.
   const setupToken = crypto.randomBytes(32).toString("hex");
   const setupTokenHash = sha256(setupToken);
 
   const effectiveExpiry = Math.min(
-    Date.now() + SETUP_TOKEN_LIFETIME_MS,
+    now.getTime() + SETUP_TOKEN_LIFETIME_MS,
     invitation.expiresAt.getTime()
   );
   const setupTokenExpiresAt = new Date(effectiveExpiry);
 
-  invitation.setupTokenHash = setupTokenHash;
-  invitation.setupTokenExpiresAt = setupTokenExpiresAt;
-  await invitation.save();
+  const updated = await Invitation.findOneAndUpdate(
+    {
+      _id: invitation._id,
+      tokenHash,
+      status: "PENDING",
+      expiresAt: { $gt: now },
+    },
+    { $set: { setupTokenHash, setupTokenExpiresAt } },
+    { returnDocument: "after" }
+  );
+  if (!updated) {
+    const current = await Invitation.findById(invitation._id);
+    if (current?.status === "REVOKED") {
+      const error = new Error("INVITATION_REVOKED");
+      error.statusCode = 410;
+      throw error;
+    }
+    if (current?.status === "ACCEPTED") {
+      const error = new Error("INVITATION_ALREADY_USED");
+      error.statusCode = 409;
+      throw error;
+    }
+    if (!current || current.expiresAt <= new Date()) {
+      const error = new Error("INVITATION_EXPIRED");
+      error.statusCode = 410;
+      throw error;
+    }
+    const error = new Error("INVITATION_PROCESSING");
+    error.statusCode = 409;
+    throw error;
+  }
 
   return {
     valid: true,
-    email: invitation.email,
+    email: updated.email,
     setupToken,
-    expiresAt: invitation.expiresAt,
+    expiresAt: updated.expiresAt,
+    setupTokenExpiresAt,
   };
 }
 
+function throwSetupError(message, statusCode) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  throw error;
+}
+
+async function throwInvitationStateError(invitation, now) {
+  if (invitation.status === "REVOKED") {
+    throwSetupError("INVITATION_REVOKED", 410);
+  }
+  if (invitation.status === "ACCEPTED") {
+    throwSetupError("INVITATION_ALREADY_USED", 409);
+  }
+  if (invitation.status === "EXPIRED" || invitation.expiresAt <= now) {
+    await Invitation.updateOne(
+      { _id: invitation._id, status: "PENDING", expiresAt: { $lte: now } },
+      { $set: { status: "EXPIRED" } }
+    );
+    throwSetupError("INVITATION_EXPIRED", 410);
+  }
+  if (invitation.setupTokenExpiresAt && invitation.setupTokenExpiresAt <= now) {
+    throwSetupError("SETUP_TOKEN_EXPIRED", 410);
+  }
+  if (invitation.status === "PROCESSING") {
+    throwSetupError("INVITATION_PROCESSING", 409);
+  }
+  throwSetupError("INVALID_OR_EXPIRED_SETUP_TOKEN", 400);
+}
+
+function serializeAuthor(user) {
+  return {
+    id: user._id.toString(),
+    name: user.name,
+    displayName: user.displayName,
+    bio: user.bio,
+    username: user.username,
+    email: user.email,
+    role: user.role,
+  };
+}
+
+function createSetupSession(user) {
+  return {
+    user: serializeAuthor(user),
+    token: generateAccessToken(user),
+  };
+}
+
+function throwAccountDuplicateError(error) {
+  if (error?.code !== 11000) throw error;
+  const duplicateField = Object.keys(error.keyPattern || error.keyValue || {})[0];
+  if (duplicateField === "username") {
+    throwSetupError("USERNAME_ALREADY_EXISTS", 409);
+  }
+  if (duplicateField === "email") {
+    throwSetupError("EMAIL_ALREADY_REGISTERED", 409);
+  }
+  if (duplicateField === "acceptedInvitationId") {
+    throwSetupError("INVITATION_ALREADY_USED", 409);
+  }
+  throw error;
+}
+
+async function ensureInvitationInviter(invitation) {
+  const inviter = await User.findOne({
+    _id: invitation.invitedBy,
+    isActive: true,
+    role: { $in: ["ROOT", "AUTHOR"] },
+  }).select("_id");
+  if (!inviter) {
+    throwSetupError("INVITER_UNAVAILABLE", 410);
+  }
+}
+
+async function finishStandaloneAcceptance(invitationId, lockId, user) {
+  const finished = await Invitation.findOneAndUpdate(
+    {
+      _id: invitationId,
+      status: "PROCESSING",
+      processingLockId: lockId,
+    },
+    {
+      $set: { status: "ACCEPTED", usedAt: new Date() },
+      $unset: {
+        processingLockedAt: 1,
+        processingLockId: 1,
+        setupTokenHash: 1,
+        setupTokenExpiresAt: 1,
+      },
+    },
+    { returnDocument: "after" }
+  );
+  if (finished) return createSetupSession(user);
+
+  const current = await Invitation.findById(invitationId);
+  if (current?.status === "ACCEPTED") return createSetupSession(user);
+  throwSetupError("INVITATION_PROCESSING", 409);
+}
+
 /**
- * Completes author account creation using setupToken.
- * Accepts username and password.
- * Hardcodes role = "AUTHOR".
- * @param {{ setupToken: string, username: string, password: string }} params
- * @returns {Promise<{ user: { id: string, name: string, username: string, email: string, role: string }, token: string }>}
+ * Creates the AUTHOR profile only from the server-bound invitation email.
+ * MongoDB transactions provide atomicity on replica sets; standalone MongoDB
+ * uses an invitation lease plus a unique acceptedInvitationId on User so an
+ * interrupted or concurrent request can never create a second account.
  */
-export async function completeAuthorSetup({ setupToken, username, password }) {
-  if (!setupToken) {
-    const error = new Error("MISSING_SETUP_TOKEN");
-    error.statusCode = 400;
-    throw error;
+export async function completeAuthorSetup({
+  setupToken,
+  fullName,
+  displayName,
+  username,
+  password,
+  bio = "",
+}) {
+  if (!setupToken || typeof setupToken !== "string") {
+    throwSetupError("MISSING_SETUP_TOKEN", 400);
   }
 
   const normalizedUsername = username.trim().toLowerCase();
   const setupTokenHash = sha256(setupToken.trim());
   const now = new Date();
-
-  // Check username uniqueness
-  const existingUsername = await User.findOne({ username: normalizedUsername });
-  if (existingUsername) {
-    const error = new Error("USERNAME_ALREADY_EXISTS");
-    error.statusCode = 409;
-    throw error;
+  const candidate = await Invitation.findOne({ setupTokenHash })
+    .select("+processingLockId");
+  if (!candidate) throwSetupError("INVALID_OR_EXPIRED_SETUP_TOKEN", 400);
+  if (candidate.status !== "PENDING"
+    && !(candidate.status === "PROCESSING"
+      && candidate.processingLockedAt
+      && candidate.processingLockedAt.getTime() < now.getTime() - PROCESSING_LOCK_TIMEOUT_MS)) {
+    await throwInvitationStateError(candidate, now);
+  }
+  if (candidate.expiresAt <= now) {
+    await throwInvitationStateError(candidate, now);
   }
 
-  // Route 1: Replica Set MongoDB Transactions
+  await ensureInvitationInviter(candidate);
+
+  const existingLinkedUser = await User.findOne({
+    acceptedInvitationId: candidate._id,
+  }).select("+acceptedInvitationId");
+  if (existingLinkedUser) {
+    if (candidate.expiresAt <= new Date()) {
+      const error = new Error("INVITATION_EXPIRED");
+      error.statusCode = 410;
+      error.invitationId = candidate._id;
+      throw error;
+    }
+    const recoveryLockId = crypto.randomUUID();
+    const recoveryAt = new Date();
+    const recovery = await Invitation.findOneAndUpdate(
+      {
+        _id: candidate._id,
+        $or: [
+          { status: "PENDING" },
+          {
+            status: "PROCESSING",
+            processingLockedAt: { $lt: new Date(recoveryAt.getTime() - PROCESSING_LOCK_TIMEOUT_MS) },
+          },
+        ],
+        setupTokenHash,
+        expiresAt: { $gt: recoveryAt },
+      },
+      {
+        $set: {
+          status: "PROCESSING",
+          processingLockedAt: recoveryAt,
+          processingLockId: recoveryLockId,
+        },
+      },
+      { returnDocument: "after" }
+    );
+    if (!recovery) {
+      await Invitation.updateOne(
+        { _id: candidate._id, status: "PENDING", expiresAt: { $lte: new Date() } },
+        { $set: { status: "EXPIRED" } }
+      );
+      const current = await Invitation.findById(candidate._id);
+      if (current) await throwInvitationStateError(current, new Date());
+      throwSetupError("INVALID_OR_EXPIRED_SETUP_TOKEN", 400);
+    }
+    return finishStandaloneAcceptance(candidate._id, recoveryLockId, existingLinkedUser);
+  }
+
+  if (!candidate.setupTokenExpiresAt || candidate.setupTokenExpiresAt <= new Date()) {
+    throwSetupError("SETUP_TOKEN_EXPIRED", 410);
+  }
+
+  const existingUsername = await User.findOne({ username: normalizedUsername }).select("_id");
+  if (existingUsername) throwSetupError("USERNAME_ALREADY_EXISTS", 409);
+
+  const existingEmail = await User.findOne({ email: candidate.email }).select("_id");
+  if (existingEmail) throwSetupError("EMAIL_ALREADY_REGISTERED", 409);
+
+  const inviter = await User.findOne({
+    _id: candidate.invitedBy,
+    isActive: true,
+    role: { $in: ["ROOT", "AUTHOR"] },
+  }).select("_id");
+  if (!inviter) throwSetupError("INVITER_UNAVAILABLE", 410);
+
+  const passwordHash = await hashPassword(password);
+  const accountFields = {
+    name: fullName.trim(),
+    displayName: displayName.trim(),
+    bio: bio.trim(),
+    username: normalizedUsername,
+    email: candidate.email,
+    passwordHash,
+    role: "AUTHOR",
+    isActive: true,
+    acceptedInvitationId: candidate._id,
+  };
+
   if (supportsTransactions()) {
     const session = await mongoose.startSession();
     session.startTransaction();
-
     try {
-      const invitation = await Invitation.findOneAndUpdate(
+      const accepted = await Invitation.findOneAndUpdate(
         {
+          _id: candidate._id,
           setupTokenHash,
           status: "PENDING",
-          setupTokenExpiresAt: { $gt: now },
-          expiresAt: { $gt: now },
+          setupTokenExpiresAt: { $gt: new Date() },
+          expiresAt: { $gt: new Date() },
         },
         {
-          $set: {
-            status: "ACCEPTED",
-            usedAt: now,
-          },
-          $unset: {
-            setupTokenHash: 1,
-            setupTokenExpiresAt: 1,
-          },
+          $set: { status: "ACCEPTED", usedAt: new Date() },
+          $unset: { setupTokenHash: 1, setupTokenExpiresAt: 1 },
         },
         { returnDocument: "after", session }
       );
-
-      if (!invitation) {
-        const existing = await Invitation.findOne({ setupTokenHash }).session(session);
-        if (existing) {
-          if (existing.status === "ACCEPTED") {
-            const err = new Error("INVITATION_ALREADY_USED");
-            err.statusCode = 409;
-            throw err;
-          }
-          if (existing.expiresAt && existing.expiresAt <= now) {
-            const err = new Error("INVITATION_EXPIRED");
-            err.statusCode = 410;
-            throw err;
-          }
-          if (existing.setupTokenExpiresAt && existing.setupTokenExpiresAt <= now) {
-            const err = new Error("SETUP_TOKEN_EXPIRED");
-            err.statusCode = 410;
-            throw err;
-          }
-        }
-        const err = new Error("INVALID_OR_EXPIRED_SETUP_TOKEN");
-        err.statusCode = 400;
-        throw err;
+      if (!accepted) {
+        const current = await Invitation.findById(candidate._id).session(session);
+        if (current) await throwInvitationStateError(current, new Date());
+        throwSetupError("INVALID_OR_EXPIRED_SETUP_TOKEN", 400);
       }
 
-      // Check email collision
-      const emailCollision = await User.findOne({ email: invitation.email }).session(session);
-      if (emailCollision) {
-        const err = new Error("EMAIL_ALREADY_REGISTERED");
-        err.statusCode = 409;
-        throw err;
-      }
-
-      const passwordHash = await hashPassword(password);
-      const createdUsers = await User.create(
-        [
-          {
-            name: normalizedUsername,
-            username: normalizedUsername,
-            email: invitation.email,
-            passwordHash,
-            role: "AUTHOR",
-            isActive: true,
-          },
-        ],
-        { session }
-      );
-
+      const [user] = await User.create([accountFields], { session });
       await session.commitTransaction();
-      const user = createdUsers[0];
-      const token = generateAccessToken(user);
-
-      return {
-        user: {
-          id: user._id.toString(),
-          name: user.name,
-          username: user.username,
-          email: user.email,
-          role: user.role,
-        },
-        token,
-      };
+      return createSetupSession(user);
     } catch (error) {
-      await session.abortTransaction();
-      throw error;
+      if (session.inTransaction()) await session.abortTransaction();
+      throwAccountDuplicateError(error);
     } finally {
       await session.endSession();
     }
   }
 
-  // Route 2: Standalone MongoDB Fallback (Two-Phase Reservation with Compensating Rollback)
+  const lockId = crypto.randomUUID();
+  const lockTime = new Date();
   const invitation = await Invitation.findOneAndUpdate(
     {
+      _id: candidate._id,
       setupTokenHash,
       $or: [
         { status: "PENDING" },
         {
           status: "PROCESSING",
-          processingLockedAt: { $lt: new Date(Date.now() - PROCESSING_LOCK_TIMEOUT_MS) },
+          processingLockedAt: { $lt: new Date(lockTime.getTime() - PROCESSING_LOCK_TIMEOUT_MS) },
         },
       ],
-      setupTokenExpiresAt: { $gt: now },
-      expiresAt: { $gt: now },
+      setupTokenExpiresAt: { $gt: lockTime },
+      expiresAt: { $gt: lockTime },
     },
     {
       $set: {
         status: "PROCESSING",
-        processingLockedAt: now,
+        processingLockedAt: lockTime,
+        processingLockId: lockId,
       },
     },
     { returnDocument: "after" }
   );
-
   if (!invitation) {
-    const existing = await Invitation.findOne({ setupTokenHash });
-    if (existing) {
-      if (existing.status === "ACCEPTED") {
-        const err = new Error("INVITATION_ALREADY_USED");
-        err.statusCode = 409;
-        throw err;
-      }
-      if (existing.expiresAt && existing.expiresAt <= now) {
-        const err = new Error("INVITATION_EXPIRED");
-        err.statusCode = 410;
-        throw err;
-      }
-      if (existing.setupTokenExpiresAt && existing.setupTokenExpiresAt <= now) {
-        const err = new Error("SETUP_TOKEN_EXPIRED");
-        err.statusCode = 410;
-        throw err;
-      }
-    }
-    const err = new Error("INVALID_OR_EXPIRED_SETUP_TOKEN");
-    err.statusCode = 400;
-    throw err;
+    const current = await Invitation.findById(candidate._id);
+    if (current) await throwInvitationStateError(current, new Date());
+    throwSetupError("INVALID_OR_EXPIRED_SETUP_TOKEN", 400);
   }
 
-  let createdUser;
   try {
-    // Check email collision
-    const emailCollision = await User.findOne({ email: invitation.email });
-    if (emailCollision) {
-      const err = new Error("EMAIL_ALREADY_REGISTERED");
-      err.statusCode = 409;
-      throw err;
+    let user = await User.findOne({ acceptedInvitationId: invitation._id })
+      .select("+acceptedInvitationId");
+    if (!user) {
+      const stillValid = await Invitation.exists({
+        _id: invitation._id,
+        status: "PROCESSING",
+        processingLockId: lockId,
+        expiresAt: { $gt: new Date() },
+        setupTokenExpiresAt: { $gt: new Date() },
+      });
+      if (!stillValid) {
+        const current = await Invitation.findById(invitation._id);
+        if (current) await throwInvitationStateError(current, new Date());
+        throwSetupError("INVITATION_PROCESSING", 409);
+      }
+
+      try {
+        user = await User.create(accountFields);
+      } catch (error) {
+        if (error.code === 11000) {
+          user = await User.findOne({ acceptedInvitationId: invitation._id })
+            .select("+acceptedInvitationId");
+          if (!user) {
+            const key = Object.keys(error.keyPattern || {})[0];
+            if (key === "username") throwSetupError("USERNAME_ALREADY_EXISTS", 409);
+            if (key === "email") throwSetupError("EMAIL_ALREADY_REGISTERED", 409);
+          }
+        }
+        if (!user) throw error;
+      }
     }
-
-    const passwordHash = await hashPassword(password);
-    createdUser = await User.create({
-      name: normalizedUsername,
-      username: normalizedUsername,
-      email: invitation.email,
-      passwordHash,
-      role: "AUTHOR",
-      isActive: true,
-    });
-  } catch (err) {
-    // Compensating rollback: restore status back to PENDING so user can retry
-    await Invitation.findByIdAndUpdate(invitation._id, {
-      $set: { status: "PENDING" },
-      $unset: { processingLockedAt: 1 },
-    });
-    throw err;
+    return await finishStandaloneAcceptance(invitation._id, lockId, user);
+  } catch (error) {
+    if (error.invitationId) {
+      await User.deleteOne({
+        acceptedInvitationId: error.invitationId,
+        role: "AUTHOR",
+      });
+      await Invitation.updateOne(
+        { _id: error.invitationId, status: "PENDING" },
+        { $set: { status: "EXPIRED" } }
+      );
+    } else {
+      await Invitation.updateOne(
+        { _id: invitation._id, status: "PROCESSING", processingLockId: lockId },
+        {
+          $set: { status: "PENDING" },
+          $unset: { processingLockedAt: 1, processingLockId: 1 },
+        }
+      );
+    }
+    throw error;
   }
-
-  // Finalize acceptance
-  await Invitation.findByIdAndUpdate(invitation._id, {
-    $set: {
-      status: "ACCEPTED",
-      usedAt: new Date(),
-    },
-    $unset: {
-      setupTokenHash: 1,
-      setupTokenExpiresAt: 1,
-      processingLockedAt: 1,
-    },
-  });
-
-  const token = generateAccessToken(createdUser);
-
-  return {
-    user: {
-      id: createdUser._id.toString(),
-      name: createdUser.name,
-      username: createdUser.username,
-      email: createdUser.email,
-      role: createdUser.role,
-    },
-    token,
-  };
 }

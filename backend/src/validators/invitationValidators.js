@@ -94,10 +94,29 @@ export function validateCreateInvitationInput(body = {}) {
  */
 export function validateCompleteSetupInput(body = {}) {
   const errors = [];
-  const { setupToken, username, password, confirmPassword } = body;
+  const {
+    fullName,
+    displayName,
+    username,
+    password,
+    confirmPassword,
+    bio,
+  } = body;
 
-  if (typeof setupToken !== "string" || !setupToken.trim()) {
-    errors.push("Setup authorization token is required");
+  if (typeof fullName !== "string" || !fullName.trim()) {
+    errors.push("Full name is required");
+  } else if (fullName.trim().length < 2) {
+    errors.push("Full name must be at least 2 characters long");
+  } else if (fullName.trim().length > 100) {
+    errors.push("Full name cannot exceed 100 characters");
+  }
+
+  if (typeof displayName !== "string" || !displayName.trim()) {
+    errors.push("Display name is required");
+  } else if (displayName.trim().length < 2) {
+    errors.push("Display name must be at least 2 characters long");
+  } else if (displayName.trim().length > 60) {
+    errors.push("Display name cannot exceed 60 characters");
   }
 
   if (typeof username !== "string" || !username.trim()) {
@@ -114,22 +133,33 @@ export function validateCompleteSetupInput(body = {}) {
 
   if (typeof password !== "string" || !password) {
     errors.push("Password is required");
-  } else if (password.length < 8) {
-    errors.push("Password must be at least 8 characters long");
+  } else if (password.length < 12) {
+    errors.push("Password must be at least 12 characters long");
   } else if (password.length > 128) {
     errors.push("Password cannot exceed 128 characters");
   }
 
-  if (confirmPassword !== undefined && password !== confirmPassword) {
+  if (typeof confirmPassword !== "string" || !confirmPassword) {
+    errors.push("Password confirmation is required");
+  } else if (password !== confirmPassword) {
     errors.push("Passwords do not match");
+  }
+
+  if (bio !== undefined && typeof bio !== "string") {
+    errors.push("Bio must be text");
+  } else if (typeof bio === "string" && bio.trim().length > 280) {
+    errors.push("Bio cannot exceed 280 characters");
   }
 
   return {
     errors,
     sanitized: {
-      setupToken: typeof setupToken === "string" ? setupToken.trim() : "",
+      fullName: typeof fullName === "string" ? fullName.trim() : "",
+      displayName: typeof displayName === "string" ? displayName.trim() : "",
       username: typeof username === "string" ? username.trim().toLowerCase() : "",
       password: typeof password === "string" ? password : "",
+      confirmPassword: typeof confirmPassword === "string" ? confirmPassword : "",
+      bio: typeof bio === "string" ? bio.trim() : "",
     },
   };
 }

@@ -38,6 +38,12 @@ export default function Login() {
     <div style={{ maxWidth: "420px", margin: "3rem auto", padding: "2rem", border: "1px solid #e4e4e7", borderRadius: "8px", boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.05)" }}>
       <h2 style={{ marginBottom: "1.5rem", textAlign: "center" }}>Sign In to Scion</h2>
 
+      {location.state?.message && (
+        <div role="status" aria-live="polite" style={{ backgroundColor: "#dcfce7", border: "1px solid #22c55e", color: "#15803d", padding: "0.75rem", borderRadius: "6px", marginBottom: "1rem", fontSize: "0.875rem" }}>
+          {location.state.message}
+        </div>
+      )}
+
       {error && (
         <div style={{ backgroundColor: "#fee2e2", border: "1px solid #ef4444", color: "#b91c1c", padding: "0.75rem", borderRadius: "6px", marginBottom: "1rem", fontSize: "0.875rem" }}>
           {error}
@@ -75,6 +81,12 @@ export default function Login() {
             style={{ width: "100%", padding: "0.625rem", borderRadius: "6px", border: "1px solid #d4d4d8", boxSizing: "border-box" }}
             placeholder="••••••••"
           />
+        </div>
+
+        <div style={{ marginTop: "-0.75rem", marginBottom: "1.25rem", textAlign: "right", fontSize: "0.875rem" }}>
+          <Link to="/forgot-password" style={{ color: "#2563eb", textDecoration: "none" }}>
+            Forgot password?
+          </Link>
         </div>
 
         <button

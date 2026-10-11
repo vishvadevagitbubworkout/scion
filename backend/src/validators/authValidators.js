@@ -69,3 +69,48 @@ export function validateLoginInput(body = {}) {
     },
   };
 }
+
+export function validatePasswordResetRequestInput(body = {}) {
+  const errors = [];
+  const { email } = body;
+
+  if (typeof email !== "string" || !email.trim()) {
+    errors.push("Email is required");
+  } else if (!EMAIL_REGEX.test(email.trim())) {
+    errors.push("A valid email address is required");
+  }
+
+  return {
+    errors,
+    sanitized: {
+      email: typeof email === "string" ? email.trim().toLowerCase() : "",
+    },
+  };
+}
+
+export function validatePasswordResetInput(body = {}) {
+  const errors = [];
+  const { token, password, confirmPassword } = body;
+
+  if (typeof token !== "string" || !/^[a-f0-9]{64}$/i.test(token.trim())) {
+    errors.push("A valid password reset token is required");
+  }
+  if (typeof password !== "string" || !password) {
+    errors.push("Password is required");
+  } else if (password.length < 8) {
+    errors.push("Password must be at least 8 characters long");
+  } else if (password.length > 128) {
+    errors.push("Password cannot exceed 128 characters");
+  }
+  if (confirmPassword !== undefined && password !== confirmPassword) {
+    errors.push("Passwords do not match");
+  }
+
+  return {
+    errors,
+    sanitized: {
+      token: typeof token === "string" ? token.trim() : "",
+      password: typeof password === "string" ? password : "",
+    },
+  };
+}

@@ -1,11 +1,14 @@
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { AuthProvider } from "../context/AuthContext";
 import Navbar from "../components/Navbar";
+import Footer from "../components/Footer";
 import ProtectedRoute from "../components/ProtectedRoute";
 
 import Home from "../pages/Home";
 import Login from "../pages/Login";
 import Register from "../pages/Register";
+import ForgotPassword from "../pages/ForgotPassword";
+import ResetPassword from "../pages/ResetPassword";
 import Journal from "../pages/Journal";
 import AcceptInvitation from "../pages/AcceptInvitation";
 import AuthorDashboard from "../pages/AuthorDashboard";
@@ -26,6 +29,8 @@ function AppRoutes() {
               <Route path="/" element={<Home />} />
               <Route path="/login" element={<Login />} />
               <Route path="/register" element={<Register />} />
+              <Route path="/forgot-password" element={<ForgotPassword />} />
+              <Route path="/reset-password" element={<ResetPassword />} />
               <Route path="/journal/:id" element={<Journal />} />
               <Route path="/accept-invitation" element={<AcceptInvitation />} />
 
@@ -74,6 +79,7 @@ function AppRoutes() {
               />
             </Routes>
           </main>
+          <Footer />
         </div>
       </AuthProvider>
     </BrowserRouter>

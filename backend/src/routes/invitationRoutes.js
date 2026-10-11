@@ -14,7 +14,7 @@ import { authorize } from "../middleware/authorize.js";
 const router = express.Router();
 
 // Public invitation validation & acceptance endpoints
-router.get("/validate", validateInvitationHandler);
+router.post("/validate", validateInvitationHandler);
 router.post("/complete", completeSetupHandler);
 
 // Protected ROOT and AUTHOR invitation endpoints (Unlimited author invitations)

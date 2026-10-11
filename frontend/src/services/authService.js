@@ -1,5 +1,6 @@
 const API_BASE_URL =
-  import.meta.env.VITE_API_URL || "http://localhost:5000/api";
+  import.meta.env.VITE_API_URL
+  || (import.meta.env.DEV ? "http://localhost:5000/api" : "/api");
 
 /**
  * Common request helper with credentials: "include" for HttpOnly cookies.
@@ -48,6 +49,20 @@ export const authService = {
     return await request("/auth/login", {
       method: "POST",
       body: JSON.stringify({ email, password }),
+    });
+  },
+
+  async requestPasswordReset({ email }) {
+    return await request("/auth/password-reset/request", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    });
+  },
+
+  async completePasswordReset({ token, password, confirmPassword }) {
+    return await request("/auth/password-reset/complete", {
+      method: "POST",
+      body: JSON.stringify({ token, password, confirmPassword }),
     });
   },
 

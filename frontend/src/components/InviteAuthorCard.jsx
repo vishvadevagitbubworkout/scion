@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import invitationService from "../services/invitationService";
 
 export default function InviteAuthorCard({ onInvitationCreated }) {
@@ -10,9 +10,27 @@ export default function InviteAuthorCard({ onInvitationCreated }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [remainingAttempts, setRemainingAttempts] = useState(null);
+  const [resendSeconds, setResendSeconds] = useState(0);
+  const [otpExpirySeconds, setOtpExpirySeconds] = useState(0);
+
+  useEffect(() => {
+    if (resendSeconds <= 0) return undefined;
+    const timer = setTimeout(() => {
+      setResendSeconds((seconds) => Math.max(0, seconds - 1));
+    }, 1000);
+    return () => clearTimeout(timer);
+  }, [resendSeconds]);
+
+  useEffect(() => {
+    if (otpExpirySeconds <= 0) return undefined;
+    const timer = setTimeout(() => {
+      setOtpExpirySeconds((seconds) => Math.max(0, seconds - 1));
+    }, 1000);
+    return () => clearTimeout(timer);
+  }, [otpExpirySeconds]);
 
   const handleSendOtp = async (e) => {
-    e.preventDefault();
+    e?.preventDefault();
     if (!email.trim()) return;
 
     setLoading(true);
@@ -22,8 +40,15 @@ export default function InviteAuthorCard({ onInvitationCreated }) {
     try {
       await invitationService.sendOtp({ email: email.trim() });
       setStep("otp");
+      setOtp("");
+      setVerificationToken("");
+      setResendSeconds(60);
+      setOtpExpirySeconds(10 * 60);
     } catch (err) {
       setError(err.message || "Failed to send OTP.");
+      if (err.data?.retryAfterSeconds) {
+        setResendSeconds(err.data.retryAfterSeconds);
+      }
     } finally {
       setLoading(false);
     }
@@ -175,13 +200,16 @@ export default function InviteAuthorCard({ onInvitationCreated }) {
               color: "#1e40af",
             }}
           >
-            A 6-digit verification code has been sent to <strong>{email}</strong>. Enter it below to verify the email address.
+            The email provider accepted a request to send a 6-digit verification code to <strong>{email}</strong>. Check the inbox and spam folder, then enter the code below. {otpExpirySeconds > 0 ? `Code expires in ${Math.floor(otpExpirySeconds / 60)}:${String(otpExpirySeconds % 60).padStart(2, "0")}.` : "The code has expired; request a new one."}
           </div>
 
           <form onSubmit={handleVerifyOtp} style={{ display: "flex", gap: "0.75rem", alignItems: "center" }}>
             <input
               type="text"
               maxLength={6}
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              aria-label="Enter 6-digit verification code"
               placeholder="Enter 6-digit OTP"
               value={otp}
               onChange={(e) => setOtp(e.target.value.replace(/\D/g, ""))}
@@ -199,15 +227,15 @@ export default function InviteAuthorCard({ onInvitationCreated }) {
             />
             <button
               type="submit"
-              disabled={loading || otp.length !== 6}
+              disabled={loading || otp.length !== 6 || otpExpirySeconds === 0}
               style={{
                 padding: "0.65rem 1.25rem",
-                backgroundColor: loading || otp.length !== 6 ? "#94a3b8" : "#2563eb",
+                backgroundColor: loading || otp.length !== 6 || otpExpirySeconds === 0 ? "#94a3b8" : "#2563eb",
                 color: "#ffffff",
                 border: "none",
                 borderRadius: "6px",
                 fontWeight: "600",
-                cursor: loading || otp.length !== 6 ? "not-allowed" : "pointer",
+                cursor: loading || otp.length !== 6 || otpExpirySeconds === 0 ? "not-allowed" : "pointer",
                 fontSize: "0.9rem",
               }}
             >
@@ -229,6 +257,14 @@ export default function InviteAuthorCard({ onInvitationCreated }) {
               Change Email
             </button>
           </form>
+          <button
+            type="button"
+            onClick={() => handleSendOtp()}
+            disabled={loading || resendSeconds > 0}
+            style={{ marginTop: "0.75rem", padding: "0.45rem 0.75rem" }}
+          >
+            {resendSeconds > 0 ? `Resend code in ${resendSeconds}s` : "Resend code"}
+          </button>
         </div>
       )}
 
@@ -246,7 +282,7 @@ export default function InviteAuthorCard({ onInvitationCreated }) {
               color: "#166534",
             }}
           >
-            ✓ <strong>{email}</strong> has been successfully verified! Click "Send Invite" to deliver the 2-hour invitation link to the author.
+            ✓ <strong>{email}</strong> has been successfully verified! Request the 2-hour invitation email below.
           </div>
 
           <div style={{ display: "flex", gap: "0.75rem" }}>
@@ -299,10 +335,10 @@ export default function InviteAuthorCard({ onInvitationCreated }) {
             }}
           >
             <h3 style={{ margin: "0 0 0.5rem", color: "#166534", fontSize: "1rem" }}>
-              ✓ Invitation Delivered
+              ✓ Invitation Email Accepted
             </h3>
             <p style={{ margin: "0 0 0.5rem", color: "#15803d", fontSize: "0.875rem" }}>
-              An invitation email has been sent to <strong>{email}</strong>.
+              The email provider accepted the invitation email for <strong>{email}</strong>. Inbox delivery is not confirmed.
             </p>
             <p style={{ margin: 0, color: "#166534", fontSize: "0.8rem", fontWeight: "600" }}>
               ⚠️ The invitation link expires in exactly 2 hours.
