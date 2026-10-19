@@ -7,7 +7,8 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "create-root": "node src/scripts/createRoot.js",
-    "verify-root": "node src/scripts/verifyRoot.js"
+    "verify-root": "node src/scripts/verifyRoot.js",
+    "test": "node --test --test-concurrency=1 src/tests/**/*.test.js"
   },
   "keywords": [],
   "author": "",
