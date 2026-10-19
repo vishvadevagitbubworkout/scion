@@ -8,13 +8,25 @@ import invitationRoutes from "./routes/invitationRoutes.js";
 import { authRequestLimit, invitationRequestLimit } from "./middleware/requestRateLimit.js";
 
 const app = express();
-const frontendOrigin = process.env.FRONTEND_URL || "http://localhost:5173";
-const frontendUrl = new URL(frontendOrigin);
-if (process.env.NODE_ENV === "production"
-  && (!process.env.FRONTEND_URL || frontendUrl.protocol !== "https:")) {
+const rawFrontendUrls = (
+  process.env.FRONTEND_URL
+    ? process.env.FRONTEND_URL.split(",")
+    : (process.env.NODE_ENV === "production" ? [] : ["http://localhost:5173"])
+)
+  .map((urlStr) => urlStr.trim())
+  .filter(Boolean);
+
+if (process.env.NODE_ENV === "production" && rawFrontendUrls.length === 0) {
   throw new Error("Production FRONTEND_URL must be an explicit HTTPS origin");
 }
-const allowedOrigin = frontendUrl.origin;
+
+const allowedOrigins = rawFrontendUrls.map((urlStr) => {
+  const parsed = new URL(urlStr);
+  if (process.env.NODE_ENV === "production" && parsed.protocol !== "https:") {
+    throw new Error("Production FRONTEND_URL must be an explicit HTTPS origin");
+  }
+  return parsed.origin;
+});
 
 app.use((req, res, next) => {
   res.set({
@@ -29,7 +41,7 @@ app.use((req, res, next) => {
 
 app.use(cors({
   origin(origin, callback) {
-    if (!origin || origin === allowedOrigin) return callback(null, true);
+    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
     return callback(new Error("Origin is not allowed by CORS"));
   },
   credentials: true,
